@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Research Assistant Platform</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <!-- Remix Icons for beautiful icons -->
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+    <!-- PDF.js for client-side PDF parsing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- Mammoth.js for client-side DOCX parsing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+</head>
+
+<body>
+
+    <!-- Background Animated Orbs -->
+    <div class="bg-orbs">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+
+    <!-- Login Section -->
+    <section id="login-view" class="view active-view">
+        <div class="glass-card login-card">
+            <div class="logo-placeholder">
+                <img src="logo.png" alt="ImRa Logo" class="official-logo"
+                    style="width: 120px; height: auto; margin-bottom: 20px;">
+            </div>
+            <h1>Welcome Scholar</h1>
+            <p class="subtitle">Your all-in-one AI research and writing platform.</p>
+
+            <button id="google-login-btn" class="oauth-btn">
+                <svg viewBox="0 0 48 48" width="24px" height="24px">
+                    <path fill="#EA4335"
+                        d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z">
+                    </path>
+                    <path fill="#4285F4"
+                        d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z">
+                    </path>
+                    <path fill="#FBBC05"
+                        d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z">
+                    </path>
+                    <path fill="#34A853"
+                        d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z">
+                    </path>
+                    <path fill="none" d="M0 0h48v48H0z"></path>
+                </svg>
+                <span>Continue with Google</span>
+                <div class="loader hidden" id="login-loader"></div>
+            </button>
+            
+            <div style="margin: 20px 0; text-align: center; color: rgba(255,255,255,0.6); position: relative;">
+                <hr style="border-color: rgba(255,255,255,0.1); margin-top: 10px;">
+                <span style="position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: #1a1a2e; padding: 0 10px; font-size: 0.9rem;">or</span>
+            </div>
+            
+            <div class="email-auth-form" style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">
+                <input type="email" id="email-input" placeholder="Email Address" style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 12px 16px; color: white; outline: none; transition: border-color 0.3s;" onfocus="this.style.borderColor='var(--accent-primary)'" onblur="this.style.borderColor='rgba(255,255,255,0.1)'">
+                <input type="password" id="password-input" placeholder="Password" style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 12px 16px; color: white; outline: none; transition: border-color 0.3s;" onfocus="this.style.borderColor='var(--accent-primary)'" onblur="this.style.borderColor='rgba(255,255,255,0.1)'">
+                <div style="display: flex; gap: 10px; margin-top: 5px;">
+                    <button id="email-signin-btn" class="primary-btn" style="flex: 1; justify-content: center; border-radius: 8px;">Sign In</button>
+                    <button id="email-signup-btn" class="secondary-btn" style="flex: 1; justify-content: center; background: transparent; border: 1px solid var(--accent-primary); color: var(--accent-primary); border-radius: 8px; cursor: pointer; display: flex; align-items: center;">Sign Up</button>
+                </div>
+            </div>
+
+            <p class="terms">By continuing, you agree to connect your Cloud Storage securely.</p>
+        </div>
+    </section>
+
+    <!-- Main Dashboard Application -->
+    <section id="app-view" class="view hidden app-layout">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar glass-panel">
+            <div class="brand">
+                <img src="logo.png" alt="ImRa Logo" style="width: 40px; height: auto;">
+                <span class="brand-name">ImRa</span>
+            </div>
+
+            <nav class="nav-menu">
+                <div class="nav-section">MAIN</div>
+                <a href="#" class="nav-link active" data-target="dashboard"><i class="ri-dashboard-line"></i>
+                    Dashboard</a>
+                <a href="#" class="nav-link" data-target="literature"><i class="ri-book-open-line"></i> Literature &
+                    Ideas</a>
+                <a href="#" class="nav-link" data-target="library"><i class="ri-folder-line"></i> Library</a>
+                <a href="#" class="nav-link" data-target="chatpdf"><i class="ri-file-pdf-line"></i> Chat with PDF</a>
+
+                <div class="nav-section">WRITING SUITE</div>
+                <a href="#" class="nav-link" data-target="draft"><i class="ri-file-text-line"></i> Thesis Draft</a>
+                <a href="#" class="nav-link" data-target="notes"><i class="ri-quill-pen-line"></i> Notes & Equations</a>
+                <a href="#" class="nav-link" data-target="latex"><i class="ri-file-word-line"></i> Word to LaTeX</a>
+                <a href="#" class="nav-link" data-target="editing"><i class="ri-magic-line"></i> AI Editing Tools</a>
+
+                <div class="nav-section">AI ASSISTANTS</div>
+                <a href="javascript:void(0)" class="nav-link" data-target="chatbot" style="display:flex; align-items:center;">
+                    <div class="bot-avatar" style="width: 24px; height: 24px; font-size: 0.9rem; margin-right: 10px; padding:0; overflow:hidden; border-radius:50%;">
+                        <svg width="100%" height="100%" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                          <defs>
+                            <radialGradient id="galaxy-bg" cx="50%" cy="50%" r="50%">
+                              <stop offset="0%" style="stop-color:#8A2BE2;stop-opacity:1" />
+                              <stop offset="50%" style="stop-color:#0000FF;stop-opacity:1" />
+                              <stop offset="100%" style="stop-color:#000000;stop-opacity:1" />
+                            </radialGradient>
+                            <linearGradient id="metallic-gold" x1="0%" y1="0%" x2="100%" y2="0%">
+                              <stop offset="0%" style="stop-color:#FFD700" />
+                              <stop offset="50%" style="stop-color:#FFA500" />
+                              <stop offset="100%" style="stop-color:#FFD700" />
+                            </linearGradient>
+                          </defs>
+                          <circle cx="50" cy="50" r="50" fill="url(#galaxy-bg)" />
+                          <circle cx="20" cy="20" r="1" fill="white" />
+                          <circle cx="80" cy="15" r="1" fill="white" />
+                          <circle cx="15" cy="70" r="1" fill="white" />
+                          <circle cx="85" cy="80" r="1" fill="white" />
+                          <circle cx="50" cy="10" r="1" fill="white" />
+                          <circle cx="90" cy="50" r="1" fill="white" />
+                          <circle cx="10" cy="50" r="1" fill="white" />
+                          <circle cx="50" cy="90" r="1" fill="white" />
+                          <circle cx="50" cy="50" r="40" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
+                          <circle cx="50" cy="50" r="30" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
+                          <circle cx="50" cy="50" r="20" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
+                          <circle cx="50" cy="50" r="3" fill="url(#metallic-gold)" />
+                        </svg>
+                    </div> Parama
+                </a>
+                <a href="javascript:void(0)" class="nav-link" data-target="paru" style="display:flex; align-items:center;">
+                    <div class="bot-avatar" style="width: 24px; height: 24px; font-size: 0.9rem; margin-right: 10px; padding:0; overflow:hidden; border-radius:50%;">
+                        <svg width="100%" height="100%" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                          <defs>
+                            <radialGradient id="parau-galaxy-bg" cx="50%" cy="50%" r="50%">
+                              <stop offset="0%" style="stop-color:#87CEFA;stop-opacity:1" />
+                              <stop offset="50%" style="stop-color:#00BFFF;stop-opacity:1" />
+                              <stop offset="100%" style="stop-color:#000022;stop-opacity:1" />
+                            </radialGradient>
+                            <linearGradient id="parau-metallic" x1="0%" y1="0%" x2="100%" y2="0%">
+                              <stop offset="0%" style="stop-color:#B0E0E6" />
+                              <stop offset="50%" style="stop-color:#ADD8E6" />
+                              <stop offset="100%" style="stop-color:#B0E0E6" />
+                            </linearGradient>
+                          </defs>
+                          <circle cx="50" cy="50" r="50" fill="url(#parau-galaxy-bg)" />
+                          <circle cx="20" cy="20" r="1" fill="white" />
+                          <circle cx="80" cy="15" r="1" fill="white" />
+                          <circle cx="15" cy="70" r="1" fill="white" />
+                          <circle cx="85" cy="80" r="1" fill="white" />
+                          <circle cx="50" cy="10" r="1" fill="white" />
+                          <circle cx="90" cy="50" r="1" fill="white" />
+                          <circle cx="10" cy="50" r="1" fill="white" />
+                          <circle cx="50" cy="90" r="1" fill="white" />
+                          <circle cx="50" cy="50" r="40" fill="none" stroke="url(#parau-metallic)" stroke-width="3" />
+                          <circle cx="50" cy="50" r="30" fill="none" stroke="url(#parau-metallic)" stroke-width="3" />
+                          <circle cx="50" cy="50" r="20" fill="none" stroke="url(#parau-metallic)" stroke-width="3" />
+                          <circle cx="50" cy="50" r="3" fill="url(#parau-metallic)" />
+                        </svg>
+                    </div> Paaru
+                </a>
+            </nav>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Top Navbar -->
+            <header class="topbar glass-panel">
+                <div class="search-bar">
+                    <i class="ri-search-line"></i>
+                    <input type="text" placeholder="Search your cloud papers...">
+                </div>
+
+                <div class="topbar-actions">
+                    <!-- Cloud Storage Indicator -->
+                    <div class="cloud-status tooltip-container">
+                        <i class="ri-google-drive-fill" style="color: #34A853; font-size: 1.2rem;"></i>
+                        <span class="storage-text">Cloud Sync Active</span>
+                        <div class="tooltip">All files are stored securely online. Laptop storage not used.</div>
+                    </div>
+
+                    <button class="icon-btn"><i class="ri-notification-3-line"></i></button>
+                    <div class="user-profile">
+                        <img src="https://ui-avatars.com/api/?name=Scholar&background=random&color=fff" alt="Profile"
+                            class="avatar" id="user-avatar" title="Click to Sign Out" style="cursor:pointer;">
+                    </div>
+                </div>
+            </header>
+
+            <!-- Dynamic Views Container -->
+            <div class="view-content" id="dashboard-content">
+
+                <div class="dashboard-header">
+                    <h2>Welcome back, Scholar!</h2>
+                    <p>Here is an overview of your research progress synced from your cloud storage.</p>
+                </div>
+
+                <div class="recommended-tools glass-panel">
+                    <div class="panel-header">
+                        <h3>Top AI Research Tools</h3>
+                        <button class="btn-text">See all tools</button>
+                    </div>
+                    <div class="tool-grid">
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-chat-1-line"></i></div>
+                            <h3>ChatGPT</h3>
+                            <p>Generate ideas, outlines, drafts, and explanations for research topics.</p>
+                            <span class="tool-label">Best for content generation</span>
+                        </div>
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-compasses-2-line"></i></div>
+                            <h3>Scite.ai</h3>
+                            <p>Smart citation checks with context on how papers support or contrast each other.</p>
+                            <span class="tool-label">Best for citation analysis</span>
+                        </div>
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-search-line"></i></div>
+                            <h3>Elicit</h3>
+                            <p>Find papers, extract data, and summarize evidence for faster literature review.</p>
+                            <span class="tool-label">Best for literature review</span>
+                        </div>
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-edit-2-line"></i></div>
+                            <h3>QuillBot</h3>
+                            <p>Paraphrase, refine, and improve academic writing clarity with a smart editor.</p>
+                            <span class="tool-label">Best for paraphrasing</span>
+                        </div>
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-spell-check-line"></i></div>
+                            <h3>Grammarly</h3>
+                            <p>Check grammar, tone, clarity, and academic writing style instantly.</p>
+                            <span class="tool-label">Best for grammar & style</span>
+                        </div>
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-map-pin-2-line"></i></div>
+                            <h3>Research Rabbit</h3>
+                            <p>Discover relevant papers and visualize literature connections in a research map.</p>
+                            <span class="tool-label">Best for discovery & mapping</span>
+                        </div>
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-git-branch-line"></i></div>
+                            <h3>Connected Papers</h3>
+                            <p>Explore how research papers are connected through citations and related work.</p>
+                            <span class="tool-label">Best for citation mapping</span>
+                        </div>
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-file-text-line"></i></div>
+                            <h3>Paperpal</h3>
+                            <p>An academic writing assistant for clear, polished papers and improved editing.</p>
+                            <span class="tool-label">Best for language polishing</span>
+                        </div>
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-rocket-line"></i></div>
+                            <h3>SciSpace</h3>
+                            <p>Read, understand, and analyze research papers with AI-powered summaries and Q&A.</p>
+                            <span class="tool-label">Best for paper understanding</span>
+                        </div>
+                        <div class="tool-card">
+                            <div class="tool-icon"><i class="ri-booklet-line"></i></div>
+                            <h3>Zotero</h3>
+                            <p>Organize references, generate citations, and manage your research library.</p>
+                            <span class="tool-label">Best for reference management</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="literature-review glass-panel">
+                    <div class="panel-header">
+                        <h3>Literature Review</h3>
+                        <button class="btn-text">Add new review</button>
+                    </div>
+                    <div class="review-entry">
+                        <h4>Topic: Transformer Models in NLP</h4>
+                        <div class="review-meta">
+                            <span><strong>Author:</strong> Ashish Vaswani et al.</span>
+                            <span><strong>Journal:</strong> Advances in Neural Information Processing Systems</span>
+                            <span><strong>Year:</strong> 2017</span>
+                            <span><strong>DOI:</strong> 10.5555/3295222.3295349</span>
+                        </div>
+                        <div class="review-summary">
+                            <h5>Summary</h5>
+                            <p>The paper introduces the Transformer architecture, which replaces recurrent and convolutional layers with a self-attention mechanism. This innovation enables faster training and improved performance on machine translation and language understanding tasks.</p>
+                        </div>
+                        <div class="review-actions">
+                            <button class="secondary-btn">Copy</button>
+                            <button class="primary-btn">Download DOC</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card glass-panel">
+                        <div class="stat-icon"
+                            style="background: rgba(99, 102, 241, 0.2); color: var(--accent-primary);">
+                            <i class="ri-folders-line"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h3>Papers Uploaded</h3>
+                            <p class="stat-value">142</p>
+                            <span class="stat-sub">Safely stored in Cloud DB</span>
+                        </div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="stat-icon"
+                            style="background: rgba(236, 72, 153, 0.2); color: var(--accent-secondary);">
+                            <i class="ri-article-line"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h3>Published Articles</h3>
+                            <p class="stat-value">3</p>
+                            <span class="stat-sub">+1 in review process</span>
+                        </div>
+                    </div>
+
+                    <div class="stat-card glass-panel progress-card">
+                        <div class="progress-info">
+                            <h3>Research Progress</h3>
+                            <p class="stat-sub">Thesis Completion</p>
+                        </div>
+                        <div class="circular-progress">
+                            <svg viewBox="0 0 36 36" class="circular-chart">
+                                <path class="circle-bg"
+                                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                                <path class="circle" stroke-dasharray="65, 100"
+                                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                                <text x="18" y="20.35" class="percentage">65%</text>
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Recent Activity & Quick Actions -->
+                <div class="dashboard-bottom">
+                    <div class="recent-files glass-panel">
+                        <div class="panel-header">
+                            <h3>Recent Online Files</h3>
+                            <button class="btn-text">View All</button>
+                        </div>
+                        <ul class="file-list">
+                            <li><i class="ri-file-pdf-line text-blue"></i> Attention_Is_All_You_Need.pdf <span>2 hrs
+                                    ago</span></li>
+                            <li><i class="ri-quill-pen-line text-purple"></i> Draft_Chapter_3_Methodology.tex <span>5
+                                    hrs ago</span></li>
+                            <li><i class="ri-file-word-line text-blue"></i> Related_Work_Notes.docx
+                                <span>Yesterday</span>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div class="quick-actions glass-panel">
+                        <div class="panel-header">
+                            <h3>AI Shortcuts</h3>
+                        </div>
+                        <div class="action-buttons">
+                            <button class="action-btn"><i class="ri-upload-cloud-2-line"></i> Upload to Cloud</button>
+                            <button class="action-btn"><i class="ri-chat-1-line"></i> Chat with AI</button>
+                            <button class="action-btn"><i class="ri-magic-line"></i> Paraphrase Draft</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+        </main>
+    </section>
+
+    <!-- Floating Parama Chatbot -->
+    <button id="parama-float-btn" style="padding:0; overflow:hidden; border-radius:50%; width:60px; height:60px;">
+        <svg width="100%" height="100%" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <radialGradient id="galaxy-bg" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" style="stop-color:#8A2BE2;stop-opacity:1" />
+              <stop offset="50%" style="stop-color:#0000FF;stop-opacity:1" />
+              <stop offset="100%" style="stop-color:#000000;stop-opacity:1" />
+            </radialGradient>
+            <linearGradient id="metallic-gold" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" style="stop-color:#FFD700" />
+              <stop offset="50%" style="stop-color:#FFA500" />
+              <stop offset="100%" style="stop-color:#FFD700" />
+            </linearGradient>
+          </defs>
+          <circle cx="50" cy="50" r="50" fill="url(#galaxy-bg)" />
+          <circle cx="20" cy="20" r="1" fill="white" />
+          <circle cx="80" cy="15" r="1" fill="white" />
+          <circle cx="15" cy="70" r="1" fill="white" />
+          <circle cx="85" cy="80" r="1" fill="white" />
+          <circle cx="50" cy="10" r="1" fill="white" />
+          <circle cx="90" cy="50" r="1" fill="white" />
+          <circle cx="10" cy="50" r="1" fill="white" />
+          <circle cx="50" cy="90" r="1" fill="white" />
+          <circle cx="50" cy="50" r="40" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
+          <circle cx="50" cy="50" r="30" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
+          <circle cx="50" cy="50" r="20" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
+          <circle cx="50" cy="50" r="3" fill="url(#metallic-gold)" />
+        </svg>
+    </button>
+
+    <div id="parama-chat-popup" class="glass-panel hidden">
+        <div class="chatbot-header"
+            style="justify-content: space-between; background: #ffffff; padding: 12px 20px; border-bottom: 1px solid rgba(0,0,0,0.1);">
+            <div style="display:flex; align-items:center; gap:12px;">
+                <div class="bot-avatar" style="width:34px; height:34px; font-size:1.2rem; padding:0; overflow:hidden; border-radius:50%;">
+                    <svg width="100%" height="100%" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                      <defs>
+                        <radialGradient id="galaxy-bg" cx="50%" cy="50%" r="50%">
+                          <stop offset="0%" style="stop-color:#8A2BE2;stop-opacity:1" />
+                          <stop offset="50%" style="stop-color:#0000FF;stop-opacity:1" />
+                          <stop offset="100%" style="stop-color:#000000;stop-opacity:1" />
+                        </radialGradient>
+                        <linearGradient id="metallic-gold" x1="0%" y1="0%" x2="100%" y2="0%">
+                          <stop offset="0%" style="stop-color:#FFD700" />
+                          <stop offset="50%" style="stop-color:#FFA500" />
+                          <stop offset="100%" style="stop-color:#FFD700" />
+                        </linearGradient>
+                      </defs>
+                      <circle cx="50" cy="50" r="50" fill="url(#galaxy-bg)" />
+                      <circle cx="20" cy="20" r="1" fill="white" />
+                      <circle cx="80" cy="15" r="1" fill="white" />
+                      <circle cx="15" cy="70" r="1" fill="white" />
+                      <circle cx="85" cy="80" r="1" fill="white" />
+                      <circle cx="50" cy="10" r="1" fill="white" />
+                      <circle cx="90" cy="50" r="1" fill="white" />
+                      <circle cx="10" cy="50" r="1" fill="white" />
+                      <circle cx="50" cy="90" r="1" fill="white" />
+                      <circle cx="50" cy="50" r="40" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
+                      <circle cx="50" cy="50" r="30" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
+                      <circle cx="50" cy="50" r="20" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
+                      <circle cx="50" cy="50" r="3" fill="url(#metallic-gold)" />
+                    </svg>
+                </div>
+                <div>
+                    <h3 style="font-size:1rem; margin:0; color:#000;">Parama ✨</h3>
+                </div>
+            </div>
+            <button id="close-parama-btn" style="font-size:1.5rem; color:#000;"><i class="ri-close-line"></i></button>
+        </div>
+        <div class="chat-messages" id="floating-chat-messages"
+            style="flex-grow:1; padding:20px; overflow-y:auto; display:flex; flex-direction:column; gap:12px;">
+            <div class="message ai-msg">Ah, greetings! I am Parama, your dedicated Chief AI Assistant for ImRa Research.</div>
+        </div>
+        <div class="chat-input-area"
+            style="padding:12px; border-top:1px solid rgba(0,0,0,0.1); display:flex; gap:10px; background:#ffffff;">
+            <input type="text" id="floating-chat-input" placeholder="Ask Parama..."
+                style="flex-grow:1; background:#f9fafb; border:1px solid rgba(0,0,0,0.1); border-radius:12px; padding:10px 14px; color:#000000; outline:none;">
+            <button class="send-btn" id="floating-send-btn" style="width:40px; height:40px; border-radius:10px;"><i
+                    class="ri-send-plane-fill"></i></button>
+        </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+
+</html>
