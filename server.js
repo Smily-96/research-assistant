@@ -1,35 +1,86 @@
-const express = require('express');
-const cors = require('cors');
-require('dotenv').config();
+/**
+ * server.js — ImRa Research Assistant
+ * Main Express server. Mounts the API router from src/api.js.
+ */
+
+const express = require("express");
+const cors = require("cors");
+const path = require("path");
+require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.static('.')); // Serve static files from current directory
+/* -------------------------------------------------------
+   Rate Limiting  (npm install express-rate-limit)
+------------------------------------------------------- */
+let rateLimit;
+try {
+  rateLimit = require("express-rate-limit");
+} catch {
+  console.warn("express-rate-limit not installed. Run: npm install express-rate-limit");
+  // Fallback no-op middleware
+  rateLimit = () => (req, res, next) => next();
+}
 
-// Basic health check endpoint
-app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'success',
-        message: 'ImRa Backend is running smoothly',
-        timestamp: new Date().toISOString()
-    });
+const aiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute window
+  max: 25,             // max 25 AI requests per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please wait a moment and try again." },
 });
 
-// Future endpoint placeholder for thesis drafting features
-app.post('/api/draft/paraphrase', async (req, res) => {
-    try {
-        const { text } = req.body;
-        // Logic to communicate with Gemini directly from backend could go here
-        res.json({ result: "Paraphrased text will appear here." });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+/* -------------------------------------------------------
+   Core Middleware
+------------------------------------------------------- */
+app.use(
+  cors({
+    origin:
+      process.env.NODE_ENV === "production"
+        ? process.env.ALLOWED_ORIGIN || "https://your-domain.com"
+        : "*",
+  })
+);
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Serve all frontend static files from project root
+app.use(express.static(path.join(__dirname)));
+
+/* -------------------------------------------------------
+   Mount API Router
+   All routes in src/api.js are prefixed with /api
+------------------------------------------------------- */
+const apiRouter = require("./src/api");
+
+// Apply rate limiting to all AI and PDF endpoints
+app.use("/api/ai", aiLimiter);
+app.use("/api/pdf", aiLimiter);
+app.use("/api/literature", aiLimiter);
+app.use("/api/editing", aiLimiter);
+app.use("/api/draft", aiLimiter);
+app.use("/api/latex", aiLimiter);
+app.use("/api/paru", aiLimiter);
+
+// Mount the router
+app.use("/api", apiRouter);
+
+/* -------------------------------------------------------
+   SPA Fallback — must come after /api routes
+------------------------------------------------------- */
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
 });
 
+/* -------------------------------------------------------
+   Start Server
+------------------------------------------------------- */
 app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`✅  ImRa server running → http://localhost:${PORT}`);
+  console.log(`    NODE_ENV : ${process.env.NODE_ENV || "development"}`);
+  console.log(
+    `    Gemini   : ${process.env.GOOGLE_API_KEY ? "API key loaded ✓" : "⚠️  GOOGLE_API_KEY missing in .env"}`
+  );
 });

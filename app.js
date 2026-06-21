@@ -1,2303 +1,1852 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-app.js";
-import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut, signInWithEmailAndPassword, createUserWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-auth.js";
-import { GoogleGenerativeAI } from "https://esm.run/@google/generative-ai";
-import { getFirestore, collection, addDoc, getDocs, query, orderBy, serverTimestamp, setDoc, doc, getDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore.js";
-import { getStorage, ref, uploadBytes, getDownloadURL, listAll } from "https://www.gstatic.com/firebasejs/12.11.0/firebase-storage.js";
+import {
+  auth,
+  provider,
+  signInWithPopup,
+  signOut,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  onAuthStateChanged
+} from "./src/firebase-config.js";
 
-const firebaseConfig = {
-    apiKey: "AIzaSyBCDcwKKePwTPOf0iNsAuQxrq84AZcuYC8",
-    authDomain: "imra---research-agent.firebaseapp.com",
-    projectId: "imra---research-agent",
-    storageBucket: "imra---research-agent.firebasestorage.app",
-    messagingSenderId: "512102709729",
-    appId: "1:512102709729:web:c9e068b536409a70a83aa0",
-    measurementId: "G-6WLXP4EDD6"
-};
+import {
+  isInstituteEmail,
+  toast,
+  escapeHtml,
+  safeFirstName,
+  initials,
+  fmtDate,
+  fmtDateTime,
+  isOverdue,
+  formatAIText,
+  extractTextFromMultiplePDFs,
+  extractTextFromDocx
+} from "./src/utils.js";
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const provider = new GoogleAuthProvider();
-provider.setCustomParameters({ prompt: 'select_account' });
-const db = getFirestore(app);
-const storage = getStorage(app);
+import {
+  getFirestoreSetupHTML,
+  getDashboardHTML,
+  getLiteratureHTML,
+  getLitReviewHTML,
+  getResearchGapHTML,
+  getProblemStmtHTML,
+  getJournalFinderHTML,
+  getLibraryHTML,
+  getNotesHTML,
+  getDraftHTML,
+  getLatexHTML,
+  getEditingHTML,
+  getChatPdfHTML,
+  getParuHTML,
+  getSupervisorDashboardHTML,
+  getScholarsViewHTML,
+  getScholarMilestoneDetailsHTML
+} from "./src/templates.js";
 
-async function saveChatMessage(userId, role, text) {
-    if(!userId) return;
-    try {
-        await addDoc(collection(db, "chatHistory", userId, "messages"), {
-            role: role,
-            text: text,
-            timestamp: serverTimestamp()
-        });
-    } catch(err) {
-        console.error("Error saving message", err);
+import {
+  getSyncMode,
+  resetFallbackMode,
+  fetchProfile,
+  createProfile,
+  updateProfile,
+  fetchSupervisors,
+  fetchScholarsForSupervisor,
+  createMilestone,
+  updateMilestone,
+  fetchMilestonesForScholar,
+  fetchMilestonesForSupervisor,
+  createSubmission,
+  fetchSubmissionsForScholar,
+  fetchSubmissionsForSupervisor,
+  sendSubmissionFeedback,
+  requestMeeting,
+  fetchMeetingsForScholar,
+  fetchMeetingsForSupervisor,
+  respondToMeeting,
+  saveChatMessage,
+  loadChatHistory,
+  saveParuMessage,
+  loadParuHistory,
+  uploadToCloudStorage,
+  loadCloudFiles,
+  saveCloudDocument,
+  loadCloudDocument,
+  saveToolHistory,
+  deleteToolHistory,
+  loadToolHistory
+} from "./src/services.js";
+
+/* -------------------------------------------------------
+   Global App States
+------------------------------------------------------- */
+let myProfile = null;
+let currentPdfTextContext = "";
+
+/* -------------------------------------------------------
+   Backend API Client
+------------------------------------------------------- */
+async function callApi(endpoint, payload) {
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || "Request failed");
     }
+    return data.result || data;
+  } catch (err) {
+    console.error(`API Call failed [${endpoint}]:`, err);
+    throw err;
+  }
 }
 
-async function loadChatHistory(userId, messagesContainer) {
-    if(!userId || !messagesContainer) return;
-    try {
-        const q = query(collection(db, "chatHistory", userId, "messages"), orderBy("timestamp"));
-        const snapshot = await getDocs(q);
-        
-        if(!snapshot.empty) {
-            let html = '';
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                const cssClass = data.role === 'user' ? 'user-msg' : 'ai-msg';
-                let formattedResponse = data.text;
-                if(data.role === 'ai') {
-                    formattedResponse = formattedResponse.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\n/g, '<br>');
-                }
-                html += `<div class="message ${cssClass}">${formattedResponse}</div>`;
-            });
-            messagesContainer.innerHTML = html;
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        }
-    } catch(err) {
-        console.error("Error loading chat history", err);
+/* ═══════════════════════════════════════════════════════
+   SCHOLAR & SUPERVISOR REGISTRATION SETUP CHECK
+   ═══════════════════════════════════════════════════════ */
+
+async function checkScholarSupervisorSetup() {
+  if (myProfile.role !== "scholar" || myProfile.supervisorId) return true;
+
+  const dashboardContent = document.getElementById("dashboard-content");
+  if (!dashboardContent) return false;
+
+  dashboardContent.innerHTML = `
+    <div class="dashboard-header">
+      <h2>Welcome to ImRa, Scholar!</h2>
+      <p>Please complete your profile setup to continue.</p>
+    </div>
+    <div class="workflow-card glass-panel" style="max-width:540px; margin-top:20px; padding:24px;">
+      <h3 style="margin-bottom:16px;">Profile Setup</h3>
+      <div class="form-grid">
+        <div>
+          <label style="font-size:0.85rem; font-weight:600; display:block; margin-bottom:6px;">Select Your Research Supervisor</label>
+          <select id="setup-supervisor-id" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--glass-border); outline:none; background:white;">
+            <option value="">-- Loading Supervisors... --</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:0.85rem; font-weight:600; display:block; margin-bottom:6px;">Academic Department</label>
+          <input type="text" id="setup-department" placeholder="e.g. Computer Science" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--glass-border); outline:none; background:white;" />
+        </div>
+        <button class="primary-btn" id="save-setup-btn" style="margin-top:16px; width:100%; padding:12px;">Complete Registration</button>
+      </div>
+    </div>
+  `;
+
+  // Fetch supervisors
+  const supervisors = await fetchSupervisors();
+  const select = document.getElementById("setup-supervisor-id");
+  if (select) {
+    if (supervisors.length === 0) {
+      select.innerHTML = '<option value="">No supervisors found. Enter manually under local fallback.</option>';
+    } else {
+      select.innerHTML = '<option value="">-- Choose Supervisor --</option>' + 
+        supervisors.map(s => `<option value="${s.uid}">${escapeHtml(s.displayName)} (${escapeHtml(s.department || "No Department")})</option>`).join("");
     }
+  }
+
+  document.getElementById("save-setup-btn").onclick = async () => {
+    const supervisorId = document.getElementById("setup-supervisor-id").value;
+    const department = document.getElementById("setup-department").value.trim();
+
+    if (!supervisorId) {
+      return alert("Please select your research supervisor.");
+    }
+
+    await updateProfile(auth.currentUser.uid, { supervisorId, department });
+    myProfile.supervisorId = supervisorId;
+    myProfile.department = department;
+    toast("Profile updated successfully!");
+    loadViewByRoute();
+  };
+
+  return false;
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    
-    // UI Elements
-    const googleLoginBtn = document.getElementById('google-login-btn');
-    const loginLoader = document.getElementById('login-loader');
-    const loginView = document.getElementById('login-view');
-    const emailInput = document.getElementById('email-input');
-    const passwordInput = document.getElementById('password-input');
-    const emailSigninBtn = document.getElementById('email-signin-btn');
-    const emailSignupBtn = document.getElementById('email-signup-btn');
-    const appView = document.getElementById('app-view');
-    const btnText = googleLoginBtn?.querySelector('span');
-    const navLinks = document.querySelectorAll('.nav-link');
-    const dashboardContent = document.getElementById('dashboard-content');
-    const userAvatar = document.getElementById('user-avatar');
+/* ═══════════════════════════════════════════════════════
+   SYNC MODE UI UPDATER
+   ═══════════════════════════════════════════════════════ */
 
-    // ---------------------------------
-    // Authentication State Listener
-    // ---------------------------------
-    onAuthStateChanged(auth, (user) => {
-        if (user) {
-            // User is signed in
-            loginView.classList.add('hidden');
-            loginView.classList.remove('active-view');
-            appView.classList.remove('hidden');
-            if(userAvatar) userAvatar.src = user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName}&background=random&color=fff`;
-            setTimeout(() => { appView.classList.add('active-view'); }, 50);
-            
-            // Re-render dashboard to show real name
-            if(dashboardContent.innerHTML.includes('Welcome back')) {
-                const firstName = user.displayName ? user.displayName.split(' ')[0] : 'Scholar';
-                dashboardContent.innerHTML = getDashboardHTML().replace('Scholar', firstName);
-            }
-            
-            // Load chat history for floating chat
-            const floatingMessages = document.getElementById('floating-chat-messages');
-            if(floatingMessages) {
-                loadChatHistory(user.uid, floatingMessages);
-            }
-        } else {
-            // User is signed out
-            appView.classList.remove('active-view');
-            setTimeout(() => {
-                appView.classList.add('hidden');
-                loginView.classList.remove('hidden');
-                setTimeout(() => { loginView.classList.add('active-view'); }, 50);
-            }, 500);
-        }
+function updateSyncStatusBadge(mode) {
+  const badge = document.getElementById("sync-status-indicator");
+  if (!badge) return;
+  if (mode === "local") {
+    badge.innerHTML = `
+      <i class="ri-database-2-line" style="color:#d97706; font-size:1.2rem;"></i>
+      <span class="storage-text" style="color:#d97706;">Local Sandbox</span>
+      <div class="tooltip">Firebase permissions blocked. Saving data in browser local storage. Click to retry Cloud Sync.</div>
+    `;
+  } else {
+    badge.innerHTML = `
+      <i class="ri-google-drive-fill" style="color:#34A853; font-size:1.2rem;"></i>
+      <span class="storage-text">Cloud Sync Active</span>
+      <div class="tooltip">All files are stored securely online. Laptop storage not used.</div>
+    `;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   SIDEBAR RENDERER
+   ═══════════════════════════════════════════════════════ */
+
+function renderSidebarNav(role) {
+  const navMenu = document.getElementById("sidebar-nav");
+  if (!navMenu) return;
+
+  if (role === "supervisor") {
+    navMenu.innerHTML = `
+      <div class="nav-section">MAIN</div>
+      <a href="javascript:void(0)" class="nav-link active" data-target="dashboard">
+        <i class="ri-dashboard-line"></i> Dashboard
+      </a>
+      <a href="javascript:void(0)" class="nav-link" data-target="scholars">
+        <i class="ri-group-line"></i> Scholars &amp; Milestones
+      </a>
+      <div class="nav-section">AI ASSISTANTS</div>
+      <a href="javascript:void(0)" class="nav-link" data-target="paru">
+        <i class="ri-sparkling-line"></i> Paaru
+      </a>
+    `;
+  } else {
+    navMenu.innerHTML = `
+      <div class="nav-section">MAIN</div>
+      <a href="javascript:void(0)" class="nav-link active" data-target="dashboard">
+        <i class="ri-dashboard-line"></i> Dashboard
+      </a>
+      <a href="javascript:void(0)" class="nav-link" data-target="literature">
+        <i class="ri-book-open-line"></i> Literature &amp; Ideas
+      </a>
+      <a href="javascript:void(0)" class="nav-link" data-target="library">
+        <i class="ri-folder-line"></i> Library
+      </a>
+      <a href="javascript:void(0)" class="nav-link" data-target="chatpdf">
+        <i class="ri-file-pdf-line"></i> Chat with PDF
+      </a>
+      <div class="nav-section">WRITING SUITE</div>
+      <a href="javascript:void(0)" class="nav-link" data-target="draft">
+        <i class="ri-file-text-line"></i> Thesis Draft
+      </a>
+      <a href="javascript:void(0)" class="nav-link" data-target="notes">
+        <i class="ri-quill-pen-line"></i> Notes &amp; Equations
+      </a>
+      <a href="javascript:void(0)" class="nav-link" data-target="latex">
+        <i class="ri-file-word-line"></i> Word to LaTeX
+      </a>
+      <a href="javascript:void(0)" class="nav-link" data-target="editing">
+        <i class="ri-magic-line"></i> AI Editing Tools
+      </a>
+      <div class="nav-section">AI ASSISTANTS</div>
+      <a href="javascript:void(0)" class="nav-link" data-target="chatbot">
+        <i class="ri-robot-line"></i> Parama
+      </a>
+      <a href="javascript:void(0)" class="nav-link" data-target="paru">
+        <i class="ri-sparkling-line"></i> Paaru
+      </a>
+    `;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   VIEW ROUTER
+   ═══════════════════════════════════════════════════════ */
+
+function loadView(target) {
+  const url = new URL(window.location);
+  url.searchParams.forEach((val, key) => url.searchParams.delete(key));
+
+  if (target !== "dashboard") {
+    url.searchParams.set("page", target);
+  }
+  window.history.pushState({}, "", url);
+  loadViewByRoute();
+}
+
+function toggleIsolatedViewLayout(isIsolated) {
+  const appLayout = document.querySelector(".app-layout");
+  const sidebar = document.querySelector(".sidebar");
+  const topbar = document.querySelector(".topbar");
+  const mainContent = document.querySelector(".main-content");
+
+  if (isIsolated) {
+    if (sidebar) sidebar.style.display = "none";
+    if (topbar) topbar.style.display = "none";
+    if (appLayout) {
+      appLayout.style.gridTemplateColumns = "1fr";
+      appLayout.style.gridTemplateRows = "1fr";
+    }
+    if (mainContent) {
+      mainContent.style.gridColumn = "1 / 2";
+      mainContent.style.gridRow = "1 / 2";
+      mainContent.style.paddingTop = "32px";
+    }
+  } else {
+    if (sidebar) sidebar.style.display = "";
+    if (topbar) topbar.style.display = "";
+    if (appLayout) {
+      appLayout.style.gridTemplateColumns = "";
+      appLayout.style.gridTemplateRows = "";
+    }
+    if (mainContent) {
+      mainContent.style.gridColumn = "";
+      mainContent.style.gridRow = "";
+      mainContent.style.paddingTop = "";
+    }
+  }
+}
+
+async function loadViewByRoute() {
+  const dashboardContent = document.getElementById("dashboard-content");
+  if (!dashboardContent) return;
+
+  if (myProfile.role === "scholar") {
+    const setupCompleted = await checkScholarSupervisorSetup();
+    if (!setupCompleted) return;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const page = params.get("page");
+  const tool = params.get("tool");
+
+  // Reset side menu highlight
+  document.querySelectorAll("#sidebar-nav .nav-link").forEach((nav) => nav.classList.remove("active"));
+
+  const isolatedTools = ["lit-review", "lit-gap", "lit-problem", "lit-publish"];
+  toggleIsolatedViewLayout(isolatedTools.includes(tool));
+
+  if (myProfile.role === "supervisor") {
+    if (page === "scholars") {
+      document.querySelector('[data-target="scholars"]')?.classList.add("active");
+      dashboardContent.innerHTML = getScholarsViewHTML();
+      setupSupervisorScholarsInteractions();
+    } else if (page === "paru") {
+      document.querySelector('[data-target="paru"]')?.classList.add("active");
+      dashboardContent.innerHTML = getParuHTML();
+      setupParuInteractions();
+    } else {
+      document.querySelector('[data-target="dashboard"]')?.classList.add("active");
+      dashboardContent.innerHTML = getSupervisorDashboardHTML(myProfile);
+      setupSupervisorDashboardInteractions();
+    }
+  } else {
+    // Scholar
+    if (page === "literature") {
+      document.querySelector('[data-target="literature"]')?.classList.add("active");
+      dashboardContent.innerHTML = getLiteratureHTML();
+      setupLiteratureInteractions();
+    } else if (tool === "lit-review") {
+      dashboardContent.innerHTML = getLitReviewHTML();
+      setupLitReviewInteractions();
+    } else if (tool === "lit-gap") {
+      dashboardContent.innerHTML = getResearchGapHTML();
+      setupResearchGapInteractions();
+    } else if (tool === "lit-problem") {
+      dashboardContent.innerHTML = getProblemStmtHTML();
+      setupProblemStmtInteractions();
+    } else if (tool === "lit-publish") {
+      dashboardContent.innerHTML = getJournalFinderHTML();
+      setupJournalFinderInteractions();
+    } else if (page === "library") {
+      document.querySelector('[data-target="library"]')?.classList.add("active");
+      dashboardContent.innerHTML = getLibraryHTML();
+      setupLibraryInteractions();
+    } else if (page === "chatpdf") {
+      document.querySelector('[data-target="chatpdf"]')?.classList.add("active");
+      dashboardContent.innerHTML = getChatPdfHTML();
+      setupChatPdfInteractions();
+    } else if (page === "draft") {
+      document.querySelector('[data-target="draft"]')?.classList.add("active");
+      dashboardContent.innerHTML = getDraftHTML();
+      setupDraftInteractions();
+    } else if (page === "notes") {
+      document.querySelector('[data-target="notes"]')?.classList.add("active");
+      dashboardContent.innerHTML = getNotesHTML();
+      setupNotesInteractions();
+    } else if (page === "latex") {
+      document.querySelector('[data-target="latex"]')?.classList.add("active");
+      dashboardContent.innerHTML = getLatexHTML();
+      setupLatexInteractions();
+    } else if (page === "editing") {
+      document.querySelector('[data-target="editing"]')?.classList.add("active");
+      dashboardContent.innerHTML = getEditingHTML();
+      setupEditingInteractions();
+    } else if (page === "paru") {
+      document.querySelector('[data-target="paru"]')?.classList.add("active");
+      dashboardContent.innerHTML = getParuHTML();
+      setupParuInteractions();
+    } else {
+      document.querySelector('[data-target="dashboard"]')?.classList.add("active");
+      dashboardContent.innerHTML = getDashboardHTML(myProfile);
+      setupDashboardInteractions();
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   TOOL HISTORY HANDLERS
+   ═══════════════════════════════════════════════════════ */
+
+async function loadToolHistoryInUI(toolName, containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  if (!auth.currentUser) return;
+
+  const history = await loadToolHistory(auth.currentUser.uid, toolName);
+  if (history.length === 0) {
+    container.innerHTML = '<div style="text-align:center; padding:20px 0; color:var(--text-muted); font-size:0.8rem;">No saved history.</div>';
+    return;
+  }
+
+  container.innerHTML = history.map(item => {
+    const safeContent = encodeURIComponent(item.content || "");
+    return `
+      <div class="history-item" data-id="${item.id}">
+        <div class="history-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+        <div class="history-actions">
+          <i class="ri-file-copy-line history-copy-btn" data-content="${safeContent}" title="Copy"></i>
+          <i class="ri-download-line history-download-btn" data-title="${escapeHtml(item.title)}" data-content="${safeContent}" title="Download"></i>
+          <i class="ri-delete-bin-line text-red history-delete-btn" data-tool="${toolName}" data-id="${item.id}" title="Delete"></i>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  // Copy click
+  container.querySelectorAll(".history-copy-btn").forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const text = decodeURIComponent(btn.getAttribute("data-content"));
+      navigator.clipboard.writeText(text);
+      toast("Copied to clipboard.");
+    };
+  });
+
+  // Download click
+  container.querySelectorAll(".history-download-btn").forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const text = decodeURIComponent(btn.getAttribute("data-content"));
+      const title = (btn.getAttribute("data-title") || "document").replace(/[^a-z0-9]/gi, "_").toLowerCase();
+      const blob = new Blob([text], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${title}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+  });
+
+  // Delete click
+  container.querySelectorAll(".history-delete-btn").forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const tool = btn.getAttribute("data-tool");
+      const id = btn.getAttribute("data-id");
+      if (confirm("Delete this saved item?")) {
+        await deleteToolHistory(auth.currentUser.uid, tool, id);
+        loadToolHistoryInUI(tool, containerId);
+      }
+    };
+  });
+
+  // Viewer click
+  container.querySelectorAll(".history-item").forEach(item => {
+    item.onclick = (e) => {
+      if (e.target.tagName === "I") return;
+      const title = item.querySelector(".history-title")?.innerText || "Saved item";
+      const content = decodeURIComponent(item.querySelector(".history-copy-btn")?.getAttribute("data-content") || "");
+      openHistoryViewer(title, content);
+    };
+  });
+}
+
+function openHistoryViewer(title, rawText) {
+  const mainArea = document.querySelector(".main-tool-area");
+  if (!mainArea) return;
+
+  Array.from(mainArea.children).forEach((child) => {
+    if (!child.classList.contains("history-viewer-overlay")) {
+      child.style.display = "none";
+      child.classList.add("hidden-by-viewer");
+    }
+  });
+
+  const oldViewer = mainArea.querySelector(".history-viewer-overlay");
+  if (oldViewer) oldViewer.remove();
+
+  const viewer = document.createElement("div");
+  viewer.className = "history-viewer-overlay glass-panel";
+  viewer.style.cssText = "height:100%; display:flex; flex-direction:column; padding:0;";
+  viewer.innerHTML = `
+    <div class="panel-header" style="padding:20px; border-bottom:1px solid rgba(0,0,0,0.1); display:flex; justify-content:space-between; align-items:center;">
+      <h2 style="margin:0; font-size:1.2rem;">${escapeHtml(title)}</h2>
+      <button class="secondary-btn" id="close-viewer-btn">Close View</button>
+    </div>
+    <div class="viewer-content" style="flex-grow:1; padding:20px; overflow-y:auto; line-height:1.6;">
+      ${formatAIText(rawText)}
+    </div>
+  `;
+  mainArea.appendChild(viewer);
+
+  document.getElementById("close-viewer-btn").onclick = () => {
+    viewer.remove();
+    Array.from(mainArea.children).forEach((child) => {
+      if (child.classList.contains("hidden-by-viewer")) {
+        child.style.display = "";
+        child.classList.remove("hidden-by-viewer");
+      }
     });
+  };
+}
 
-    // ---------------------------------
-    // Login Flow
-    // ---------------------------------
-    if(emailSigninBtn) {
-        emailSigninBtn.addEventListener('click', () => {
-            const email = emailInput.value.trim();
-            const password = passwordInput.value.trim();
-            if(!email || !password) return alert("Please enter both email and password.");
-            emailSigninBtn.innerHTML = "Signing in...";
-            emailSigninBtn.style.pointerEvents = 'none';
-            signInWithEmailAndPassword(auth, email, password).catch((error) => {
-                console.error(error);
-                alert("Sign-in Failed: " + error.message);
-                emailSigninBtn.innerHTML = "Sign In";
-                emailSigninBtn.style.pointerEvents = 'auto';
-            }).then(() => {
-                if(auth.currentUser) emailSigninBtn.innerHTML = "Sign In";
-                emailSigninBtn.style.pointerEvents = 'auto';
-            });
-        });
+/* ═══════════════════════════════════════════════════════
+   SCHOLAR INTERACTIONS
+   ═══════════════════════════════════════════════════════ */
+
+function setupDashboardInteractions() {
+  loadScholarDashboardStats();
+
+  const uploadBtn = document.getElementById("dash-upload-btn");
+  const fileInput = document.getElementById("dash-file-input");
+  const askBtn = document.getElementById("dash-ask-parama-btn");
+  const editBtn = document.getElementById("dash-editing-btn");
+  const viewLibBtn = document.getElementById("dash-view-library");
+
+  if (uploadBtn && fileInput) {
+    uploadBtn.onclick = () => fileInput.click();
+    fileInput.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const original = uploadBtn.innerHTML;
+      uploadBtn.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> Uploading...';
+      await uploadToCloudStorage(auth.currentUser.uid, file);
+      uploadBtn.innerHTML = original;
+      loadScholarDashboardStats();
+      toast("File uploaded successfully.");
+    };
+  }
+
+  if (askBtn) {
+    askBtn.onclick = () => document.getElementById("parama-float-btn")?.click();
+  }
+  if (editBtn) {
+    editBtn.onclick = () => loadView("editing");
+  }
+  if (viewLibBtn) {
+    viewLibBtn.onclick = () => loadView("library");
+  }
+}
+
+async function loadScholarDashboardStats() {
+  const uid = auth.currentUser.uid;
+
+  // Cloud Files count
+  const files = await loadCloudFiles(uid);
+  const papersEl = document.getElementById("stats-papers-count");
+  if (papersEl) papersEl.innerText = files.length;
+
+  // Submissions count
+  const subs = await fetchSubmissionsForScholar(uid);
+  const subsEl = document.getElementById("stats-submissions-count");
+  if (subsEl) subsEl.innerText = subs.length;
+
+  // Milestones progress
+  const milestones = await fetchMilestonesForScholar(uid);
+  const completed = milestones.filter(m => m.status === "completed").length;
+  const percent = milestones.length ? Math.round((completed / milestones.length) * 100) : 0;
+
+  const textEl = document.getElementById("stats-progress-text");
+  const circleEl = document.getElementById("stats-progress-circle");
+  if (textEl) textEl.innerText = `${percent}%`;
+  if (circleEl) circleEl.setAttribute("stroke-dasharray", `${percent}, 100`);
+
+  const subEl = document.getElementById("stats-progress-sub");
+  if (subEl) subEl.innerText = `${completed} of ${milestones.length} milestones done`;
+
+  // Render recent files
+  const recentFilesList = document.getElementById("dash-recent-files-list");
+  if (recentFilesList) {
+    if (files.length === 0) {
+      recentFilesList.innerHTML = `<li style="color:var(--text-muted); font-size:0.9rem; justify-content:center;">No cloud files uploaded yet.</li>`;
+    } else {
+      recentFilesList.innerHTML = files.slice(0, 3).map(f => {
+        const icon = f.name.endsWith(".pdf") ? "ri-file-pdf-line text-blue" : "ri-file-word-line text-blue";
+        return `<li><i class="${icon}"></i> <a href="${f.url}" target="_blank" style="color:inherit; text-decoration:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(f.name)}</a></li>`;
+      }).join("");
     }
+  }
+}
 
-    if(emailSignupBtn) {
-        emailSignupBtn.addEventListener('click', () => {
-            const email = emailInput.value.trim();
-            const password = passwordInput.value.trim();
-            if(!email || !password) return alert("Please enter both email and password.");
-            emailSignupBtn.innerHTML = "Creating...";
-            emailSignupBtn.style.pointerEvents = 'none';
-            createUserWithEmailAndPassword(auth, email, password).catch((error) => {
-                console.error(error);
-                alert("Sign-up Failed: " + error.message);
-                emailSignupBtn.innerHTML = "Sign Up";
-                emailSignupBtn.style.pointerEvents = 'auto';
-            }).then(() => {
-                if(auth.currentUser) emailSignupBtn.innerHTML = "Sign Up";
-                emailSignupBtn.style.pointerEvents = 'auto';
-            });
-        });
-    }
+function setupLiteratureInteractions() {
+  const reviewCard = document.getElementById("hub-card-review");
+  if (reviewCard) reviewCard.onclick = () => window.open("/?tool=lit-review", "_blank");
 
-    if(googleLoginBtn) {
-        googleLoginBtn.addEventListener('click', () => {
-            loginLoader.classList.remove('hidden');
-            btnText.textContent = 'Authenticating Cloud...';
-            googleLoginBtn.style.pointerEvents = 'none';
+  const gapCard = document.getElementById("hub-card-gap");
+  if (gapCard) gapCard.onclick = () => window.open("/?tool=lit-gap", "_blank");
 
-            signInWithPopup(auth, provider).catch((error) => {
-                console.error(error);
-                alert("Login Failed. Make sure you are running this from a web server or Netlify link! Error: " + error.message);
-                loginLoader.classList.add('hidden');
-                btnText.textContent = 'Continue with Google';
-                googleLoginBtn.style.pointerEvents = 'auto';
-            });
-        });
-    }
+  const probCard = document.getElementById("hub-card-problem");
+  if (probCard) probCard.onclick = () => window.open("/?tool=lit-problem", "_blank");
 
-    if(userAvatar) {
-        userAvatar.addEventListener('click', () => {
-            if(confirm("Do you want to sign out?")) {
-                signOut(auth);
-            }
-        });
-    }
+  const pubCard = document.getElementById("hub-card-publish");
+  if (pubCard) pubCard.onclick = () => window.open("/?tool=lit-publish", "_blank");
+}
 
-    // ---------------------------------
-    // Floating Chatbot Logic
-    // ---------------------------------
-    const floatingBtn = document.getElementById('parama-float-btn');
-    const floatingPopup = document.getElementById('parama-chat-popup');
-    const closeParamaBtn = document.getElementById('close-parama-btn');
-    const floatingInput = document.getElementById('floating-chat-input');
-    const floatingSend = document.getElementById('floating-send-btn');
-    const floatingMessages = document.getElementById('floating-chat-messages');
+function attachLitBackBtn() {
+  const btn = document.getElementById("lit-back-btn");
+  if (btn) {
+    btn.onclick = () => window.close();
+  }
+}
 
-    function toggleChatPopup() {
-        floatingPopup.classList.toggle('hidden');
-        if(!floatingPopup.classList.contains('hidden')) floatingInput.focus();
-    }
+function subToolLoading(toolId, msg) {
+  const outArea = document.getElementById(`${toolId}-output-area`);
+  const outContent = document.getElementById(`${toolId}-output-content`);
+  if (!outArea || !outContent) return null;
+  outArea.style.display = "block";
+  outContent.innerHTML = `<i class="ri-loader-4-line ri-spin"></i> ${msg}...`;
+  outArea.scrollIntoView({ behavior: "smooth" });
+  return outContent;
+}
 
-    if(floatingBtn) floatingBtn.addEventListener('click', toggleChatPopup);
-    if(closeParamaBtn) closeParamaBtn.addEventListener('click', () => floatingPopup.classList.add('hidden'));
+function bindCopyAndDownload(toolId, title) {
+  const copyBtn = document.getElementById(`${toolId}-copy-btn`);
+  const downloadBtn = document.getElementById(`${toolId}-download-btn`);
+  const content = document.getElementById(`${toolId}-output-content`);
 
-    if(floatingSend) {
-        floatingSend.addEventListener('click', async () => {
-            if(floatingInput.value.trim() !== '') {
-                const userText = floatingInput.value;
-                floatingMessages.innerHTML += '<div class="message user-msg">' + userText + '</div>';
-                floatingInput.value = '';
-                floatingMessages.scrollTop = floatingMessages.scrollHeight;
-                
-                const currentUser = auth.currentUser;
-                if (currentUser) saveChatMessage(currentUser.uid, 'user', userText);
-                
-                const typingId = "typing-" + Date.now();
-                floatingMessages.innerHTML += '<div class="message ai-msg" id="' + typingId + '">Parama is thinking...</div>';
-                floatingMessages.scrollTop = floatingMessages.scrollHeight;
-                
-                const aiResponse = await fetchGeminiResponse(userText);
-                
-                if (currentUser) saveChatMessage(currentUser.uid, 'ai', aiResponse);
-                
-                const typingEl = document.getElementById(typingId);
-                if(typingEl) typingEl.remove();
-                
-                const formattedResponse = aiResponse.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\n/g, '<br>');
-                floatingMessages.innerHTML += '<div class="message ai-msg">' + formattedResponse + '</div>';
-                floatingMessages.scrollTop = floatingMessages.scrollHeight;
-            }
-        });
-        
-        floatingInput.addEventListener('keypress', (e) => {
-            if(e.key === 'Enter') floatingSend.click();
-        });
-    }
+  if (copyBtn && content) {
+    copyBtn.onclick = () => {
+      navigator.clipboard.writeText(content.innerText);
+      toast("Copied to clipboard.");
+    };
+  }
 
-    // ---------------------------------
-    // SPA Routing Simulation
-    // ---------------------------------
-    navLinks.forEach(link => {
-        link.addEventListener('click', (e) => {
-            e.preventDefault();
-            
-            const target = link.getAttribute('data-target');
-            
-            // If they click Parama in sidebar, just pop open the floating widget!
-            if (target === 'chatbot') {
-                toggleChatPopup();
-                return;
-            }
-            
-            navLinks.forEach(nav => nav.classList.remove('active'));
-            link.classList.add('active');
+  if (downloadBtn && content) {
+    downloadBtn.onclick = () => {
+      const html =
+        "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'></head><body>" +
+        `<div style="font-family:Arial, sans-serif;">${content.innerHTML}</div>` +
+        "</body></html>";
+      const url = "data:application/vnd.ms-word;charset=utf-8," + encodeURIComponent(html);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}.doc`;
+      a.click();
+    };
+  }
+}
 
-            dashboardContent.style.opacity = '0';
-            setTimeout(() => {
-                if (target === 'dashboard') { dashboardContent.innerHTML = getDashboardHTML(); setupDashboardInteractions(); }
-                else if (target === 'literature') { dashboardContent.innerHTML = getLiteratureHTML(); setupLiteratureInteractions(); }
-                else if (target === 'library') { dashboardContent.innerHTML = getLibraryHTML(); setupLibraryInteractions(); }
-                else if (target === 'pdf-viewer') { dashboardContent.innerHTML = getPdfViewerHTML(); setupPdfViewerInteractions(); }
-                else if (target === 'notes') { dashboardContent.innerHTML = getNotesHTML(); setupNotesInteractions(); }
-                else if (target === 'latex') { dashboardContent.innerHTML = getLatexHTML(); setupLatexInteractions(); }
-                else if (target === 'editing') { dashboardContent.innerHTML = getEditingHTML(); setupEditingInteractions(); }
-                else if (target === 'chatpdf') { dashboardContent.innerHTML = getChatPdfHTML(); setupChatInteractions(); setupChatPdfInteractions(); }
-                else if (target === 'draft') { dashboardContent.innerHTML = getDraftHTML(); setupDraftInteractions(); }
-                else if (target === 'paru') {
-                    dashboardContent.innerHTML = getParuHTML();
-                    setupParuInteractions();
-                }
-                dashboardContent.style.opacity = '1';
-            }, 300);
-        });
+function setupLitReviewInteractions() {
+  loadToolHistoryInUI("lit-review", "lit-review-history-list");
+  attachLitBackBtn();
+  const reviewFile = document.getElementById("lit-review-file");
+  if (reviewFile) {
+    reviewFile.onchange = async (e) => {
+      if (!e.target.files.length) return;
+      const outContent = subToolLoading("lit-review", "Extracting papers and generating literature review");
+      const text = await extractTextFromMultiplePDFs(e.target.files);
+      
+      try {
+        const response = await callApi("/api/literature/review", { text: text.substring(0, 20000) });
+        outContent.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "lit-review", "Literature Review", response);
+        loadToolHistoryInUI("lit-review", "lit-review-history-list");
+        bindCopyAndDownload("lit-review", "Literature Review");
+      } catch (err) {
+        outContent.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupResearchGapInteractions() {
+  loadToolHistoryInUI("lit-gap", "lit-gap-history-list");
+  attachLitBackBtn();
+  const gapFile = document.getElementById("lit-gap-file");
+  if (gapFile) {
+    gapFile.onchange = async (e) => {
+      if (!e.target.files.length) return;
+      if (e.target.files.length > 10) {
+        return alert("Please upload a maximum of 10 papers.");
+      }
+      const outContent = subToolLoading("lit-gap", "Analyzing papers for research gaps");
+      const text = await extractTextFromMultiplePDFs(e.target.files);
+
+      try {
+        const response = await callApi("/api/literature/gap", { text: text.substring(0, 20000) });
+        outContent.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "lit-gap", "Research Gap Analysis", response);
+        loadToolHistoryInUI("lit-gap", "lit-gap-history-list");
+        bindCopyAndDownload("lit-gap", "Research Gaps");
+      } catch (err) {
+        outContent.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupProblemStmtInteractions() {
+  loadToolHistoryInUI("lit-problem", "lit-problem-history-list");
+  attachLitBackBtn();
+  const fileInput = document.getElementById("lit-problem-file");
+  if (fileInput) {
+    fileInput.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const outContent = subToolLoading("lit-problem", "Reading document and formulating statement");
+      const text = await extractTextFromDocx(file);
+
+      try {
+        const response = await callApi("/api/literature/problem-statement", { text: text.substring(0, 15000) });
+        outContent.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "lit-problem", "Problem Statements", response);
+        loadToolHistoryInUI("lit-problem", "lit-problem-history-list");
+        bindCopyAndDownload("lit-problem", "Problem Statement");
+      } catch (err) {
+        outContent.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupJournalFinderInteractions() {
+  loadToolHistoryInUI("lit-publish", "lit-publish-history-list");
+  attachLitBackBtn();
+  const btn = document.getElementById("lit-publish-btn");
+  const textarea = document.getElementById("lit-publish-text");
+  if (btn && textarea) {
+    btn.onclick = async () => {
+      const text = textarea.value.trim();
+      if (!text) return alert("Please paste your abstract first.");
+      const outContent = subToolLoading("lit-publish", "Searching journals matching abstract");
+
+      try {
+        const response = await callApi("/api/literature/journal-finder", { abstract: text.substring(0, 5000) });
+        outContent.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "lit-publish", "Journal Finder Suggestions", response);
+        loadToolHistoryInUI("lit-publish", "lit-publish-history-list");
+        bindCopyAndDownload("lit-publish", "Journal Finder");
+      } catch (err) {
+        outContent.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupLibraryInteractions() {
+  const uploadInput = document.getElementById("file-upload");
+  const uploadStatus = document.getElementById("upload-status");
+
+  if (uploadInput) {
+    uploadInput.onchange = async (e) => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      uploadStatus.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> Uploading files...';
+      for (const file of files) {
+        await uploadToCloudStorage(auth.currentUser.uid, file);
+      }
+      uploadStatus.innerHTML = `${files.length} file(s) uploaded successfully.`;
+      await renderCloudFiles();
+    };
+  }
+
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+
+      document.querySelectorAll(".tab-content .file-list").forEach((list) => list.classList.remove("active"));
+
+      const map = {
+        all: "all-files",
+        pdfs: "pdf-files",
+        docs: "doc-files",
+        others: "other-files",
+      };
+      document.getElementById(map[btn.dataset.tab])?.classList.add("active");
+    };
+  });
+
+  renderCloudFiles();
+}
+
+async function renderCloudFiles() {
+  const allList = document.getElementById("all-file-list");
+  const pdfList = document.getElementById("pdf-file-list");
+  const docList = document.getElementById("doc-file-list");
+  const otherList = document.getElementById("other-file-list");
+  if (!allList || !pdfList || !docList || !otherList) return;
+
+  const files = await loadCloudFiles(auth.currentUser.uid);
+
+  allList.innerHTML = "";
+  pdfList.innerHTML = "";
+  docList.innerHTML = "";
+  otherList.innerHTML = "";
+
+  if (!files.length) {
+    allList.innerHTML = "<li>No files uploaded yet.</li>";
+    return;
+  }
+
+  files.forEach((file) => {
+    const itemHtml = `<li><i class="ri-file-line"></i> <a href="${file.url}" target="_blank" style="color:inherit; text-decoration:none;">${escapeHtml(file.name)}</a></li>`;
+    allList.innerHTML += itemHtml;
+
+    const lower = file.name.toLowerCase();
+    if (lower.endsWith(".pdf")) pdfList.innerHTML += itemHtml;
+    else if (lower.endsWith(".doc") || lower.endsWith(".docx") || lower.endsWith(".txt") || lower.endsWith(".md")) docList.innerHTML += itemHtml;
+    else otherList.innerHTML += itemHtml;
+  });
+}
+
+function setupNotesInteractions() {
+  loadToolHistoryInUI("notes", "notes-history-list");
+  const textarea = document.getElementById("notes-textarea");
+  const saveBtn = document.getElementById("notes-save-btn");
+  const preview = document.getElementById("notes-math-preview");
+
+  if (textarea) {
+    loadCloudDocument(auth.currentUser.uid, "notes").then(val => {
+      textarea.value = val;
+      // Trigger preview on load
+      textarea.dispatchEvent(new Event("input"));
     });
-
-    // ---------------------------------
-    // View Templates
-    // ---------------------------------
-    function getDashboardHTML() {
-        return `
-            <div class="dashboard-header">
-                <h2>Welcome back, Scholar!</h2>
-                <p>Here is an overview of your research progress synced from your cloud storage.</p>
-            </div>
-            <div class="stats-grid">
-                <div class="stat-card glass-panel">
-                    <div class="stat-icon" style="background: rgba(99, 102, 241, 0.2); color: var(--accent-primary);"><i class="ri-folders-line"></i></div>
-                    <div class="stat-info"><h3>Papers Uploaded</h3><p class="stat-value">142</p><span class="stat-sub">Safely stored in Cloud DB</span></div>
-                </div>
-                <div class="stat-card glass-panel">
-                    <div class="stat-icon" style="background: rgba(236, 72, 153, 0.2); color: var(--accent-secondary);"><i class="ri-article-line"></i></div>
-                    <div class="stat-info"><h3>Published Articles</h3><p class="stat-value">3</p><span class="stat-sub">+1 in review process</span></div>
-                </div>
-                <div class="stat-card glass-panel progress-card">
-                    <div class="progress-info"><h3>Research Progress</h3><p class="stat-sub">Thesis Completion</p></div>
-                    <div class="circular-progress">
-                        <svg viewBox="0 0 36 36" class="circular-chart">
-                            <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-                            <path class="circle" stroke-dasharray="65, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-                            <text x="18" y="20.35" class="percentage">65%</text>
-                        </svg>
-                    </div>
-                </div>
-            </div>
-            <div class="dashboard-bottom">
-                <div class="recent-files glass-panel">
-                    <div class="panel-header"><h3>Recent Online Files</h3><button class="btn-text">View All</button></div>
-                    <ul class="file-list">
-                        <li><i class="ri-file-pdf-line text-blue"></i> Attention_Is_All_You_Need.pdf <span>2 hrs ago</span></li>
-                        <li><i class="ri-quill-pen-line text-purple"></i> Draft_Chapter_3_Methodology.tex <span>5 hrs ago</span></li>
-                        <li><i class="ri-file-word-line text-blue"></i> Related_Work_Notes.docx <span>Yesterday</span></li>
-                    </ul>
-                </div>
-                <div class="quick-actions glass-panel">
-                    <div class="panel-header"><h3>AI Shortcuts</h3></div>
-                    <div class="action-buttons">
-                        <button class="action-btn" id="dash-upload-btn"><i class="ri-upload-cloud-2-line"></i> Upload to Cloud</button>
-                        <input type="file" id="dash-file-input" style="display:none;" accept=".pdf,.doc,.docx" />
-                        <button class="action-btn" onclick="document.querySelector('[data-target=\\'chatbot\\']').click()"><i class="ri-robot-line"></i> Ask Parama</button>
-                        <button class="action-btn" onclick="document.querySelector('[data-target=\\'editing\\']').click()"><i class="ri-magic-line"></i> Paraphrase Draft</button>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function getLiteratureHTML() {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px;">
-                <h2>Literature & Ideas Engine</h2>
-                <p>Select a tool below to synthesize literature, find gaps, and formulate problem statements.</p>
-            </div>
-            <div class="tool-grid">
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-card-review">
-                    <i class="ri-book-read-line tool-icon text-blue"></i>
-                    <h3>Literature Review Generator</h3>
-                    <p>Upload PDFs to let AI synthesize related work.</p>
-                </div>
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-card-gap">
-                    <i class="ri-crosshair-2-line tool-icon text-purple"></i>
-                    <h3>Research Gap Finder</h3>
-                    <p>Analyze papers to highlight unexplored methodologies.</p>
-                </div>
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-card-problem">
-                    <i class="ri-edit-circle-line tool-icon text-green"></i>
-                    <h3>Problem Statement Formulator</h3>
-                    <p>Draft compelling problem statements using your own Word draft as context.</p>
-                </div>
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-card-publish">
-                    <i class="ri-global-line tool-icon text-pink"></i>
-                    <h3>Where to Publish?</h3>
-                    <p>Get AI suggestions for Journals matching your abstract.</p>
-                </div>
-            </div>
-        `;
-    }
-
-    function getLibraryHTML() {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px;">
-                <h2>Library</h2>
-                <p>Upload and manage your research files and folders.</p>
-            </div>
-            <div class="upload-section glass-panel">
-                <h3>Upload Files</h3>
-                <input type="file" multiple id="file-upload" accept=".pdf,.doc,.docx,.txt,.md">
-                <p>Select multiple files to upload to your cloud library.</p>
-                <div id="upload-actions" style="display: none; margin-top: 10px;">
-                    <button id="save-upload" class="primary-btn">Save</button>
-                    <button id="cancel-upload" class="secondary-btn" style="margin-left: 10px;">Cancel</button>
-                </div>
-                <div id="upload-status" style="margin-top: 10px; color: var(--text-main); font-size: 0.95rem;"></div>
-            </div>
-            <div class="upload-section glass-panel">
-                <h3>Upload Folder</h3>
-                <input type="file" webkitdirectory multiple id="folder-upload">
-                <p>Select a folder to upload all its contents to your cloud library.</p>
-                <div id="folder-upload-actions" style="display: none; margin-top: 10px;">
-                    <button id="save-folder-upload" class="primary-btn">Save</button>
-                    <button id="cancel-folder-upload" class="secondary-btn" style="margin-left: 10px;">Cancel</button>
-                </div>
-                <div id="folder-upload-status" style="margin-top: 10px; color: var(--text-main); font-size: 0.95rem;"></div>
-            </div>
-            <div class="library-tabs glass-panel">
-                <div class="tab-buttons">
-                    <button class="tab-btn active" data-tab="all">All Files</button>
-                    <button class="tab-btn" data-tab="pdfs">PDFs</button>
-                    <button class="tab-btn" data-tab="docs">Documents</button>
-                    <button class="tab-btn" data-tab="others">Others</button>
-                </div>
-                <div class="tab-content">
-                    <div id="all-files" class="file-list active">
-                        <ul id="all-file-list"></ul>
-                    </div>
-                    <div id="pdf-files" class="file-list">
-                        <ul id="pdf-file-list"></ul>
-                    </div>
-                    <div id="doc-files" class="file-list">
-                        <ul id="doc-file-list"></ul>
-                    </div>
-                    <div id="other-files" class="file-list">
-                        <ul id="other-file-list"></ul>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function getPdfViewerHTML() {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px; display:flex; justify-content:space-between; align-items:flex-start;">
-                <div><h2>PDF Viewer</h2><p>View your uploaded PDF document.</p></div>
-                <button class="secondary-btn" id="pdf-viewer-back-btn"><i class="ri-arrow-left-line"></i> Back to Library</button>
-            </div>
-            <div class="pdf-viewer-full glass-panel">
-                <div id="pdf-viewer-render-area" style="height: 70vh; display:flex; justify-content:center; align-items:center;">
-                    <div style="color: var(--text-muted);">Loading PDF...</div>
-                </div>
-            </div>
-        `;
-    }
-
-    function getLitSubToolFrame(toolId, title, desc, historyLabel, inputsHTML) {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px; display:flex; justify-content:space-between; align-items:flex-start;">
-                <div><h2>${title}</h2><p>${desc}</p></div>
-                <button class="secondary-btn" id="lit-back-btn"><i class="ri-arrow-left-line"></i> Back to Hub</button>
-            </div>
-            <div class="tool-layout">
-                <div class="history-sidebar glass-panel" style="padding: 20px;">
-                    <div class="panel-header" style="padding-bottom:10px; margin-bottom:10px;">
-                        <h3 style="font-size: 1rem;">${historyLabel}</h3>
-                    </div>
-                    <div id="${toolId}-history-list" style="overflow-y:auto; flex-grow:1; padding-right: 5px;">
-                    </div>
-                </div>
-                <div class="main-tool-area glass-panel" style="padding: 20px; overflow-y: auto;">
-                    ${inputsHTML}
-                    <div id="${toolId}-output-area" style="margin-top: 24px; display: none;">
-                        <h3 style="margin-bottom: 12px; border-bottom: 1px solid rgba(0,0,0,0.1); padding-bottom: 10px;">AI Output</h3>
-                        <div class="message ai-msg" id="${toolId}-output-content" style="white-space: pre-wrap; margin-top: 10px; margin-bottom: 15px; width:100%; max-width:100%;"></div>
-                        <div style="display:flex; justify-content:flex-end; gap:10px;">
-                            <button class="action-btn" onclick="copyToClipboard('${toolId}-output-content')" style="padding: 8px 16px; font-size: 0.95rem; border-color:var(--accent-primary); color:var(--accent-primary); background:transparent;"><i class="ri-file-copy-line"></i> Copy Text</button>
-                            <button class="primary-btn" onclick="downloadAsWord('${toolId}-output-content', '${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}')" style="padding: 8px 16px; font-size: 0.95rem; display:flex; align-items:center; gap:8px;"><i class="ri-download-line"></i> Download .doc</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function getLitReviewHTML() {
-        return getLitSubToolFrame('lit-review', 'Literature Review Generator', 'Upload multi-PDFs to let AI synthesize related work.', 'Past Reviews', `
-            <div class="upload-zone text-center" style="border:1px dashed rgba(255,255,255,0.2); padding: 40px; border-radius:12px;">
-                <i class="ri-file-pdf-line" style="font-size: 3rem; color: var(--accent-secondary);"></i>
-                <h3 style="margin: 10px 0;">Upload Papers (.pdf)</h3>
-                <input type="file" id="lit-review-file" accept=".pdf" multiple style="display:none;">
-                <button class="primary-btn mt-10" onclick="document.getElementById('lit-review-file').click()">Select PDFs & Start</button>
-            </div>
-        `);
-    }
-
-    function getResearchGapHTML() {
-        return getLitSubToolFrame('lit-gap', 'Research Gap Finder', 'Analyze papers to highlight unexplored methodologies (Max 10 papers).', 'Gaps Found', `
-            <div class="upload-zone text-center" style="border:1px dashed rgba(255,255,255,0.2); padding: 40px; border-radius:12px;">
-                <i class="ri-crosshair-2-line" style="font-size: 3rem; color: var(--accent-secondary);"></i>
-                <h3 style="margin: 10px 0;">Upload Up To 10 Papers (.pdf)</h3>
-                <input type="file" id="lit-gap-file" accept=".pdf" multiple style="display:none;">
-                <button class="primary-btn mt-10" onclick="document.getElementById('lit-gap-file').click()">Upload & Analyze</button>
-            </div>
-        `);
-    }
-
-    function getProblemStmtHTML() {
-        return getLitSubToolFrame('lit-problem', 'Problem Statement Formulator', 'Upload your Word draft (.docx) and let AI draft compelling problem statements.', 'Saved Statements', `
-            <div class="upload-zone text-center" style="border:1px dashed rgba(255,255,255,0.2); padding: 40px; border-radius:12px;">
-                <i class="ri-file-word-line" style="font-size: 3rem; color: var(--accent-secondary);"></i>
-                <h3 style="margin: 10px 0;">Upload Your Ideas Draft (.docx)</h3>
-                <input type="file" id="lit-problem-file" accept=".docx" style="display:none;">
-                <button class="primary-btn mt-10" onclick="document.getElementById('lit-problem-file').click()">Read Doc & Draft Statement</button>
-            </div>
-        `);
-    }
-
-    function getJournalFinderHTML() {
-        return getLitSubToolFrame('lit-publish', 'Where to Publish?', 'Paste your abstract to find top journals.', 'Journal Results', `
-            <div class="upload-zone text-center" style="border:1px dashed rgba(255,255,255,0.2); padding: 40px; border-radius:12px;">
-                <i class="ri-global-line" style="font-size: 3rem; color: var(--accent-secondary);"></i>
-                <h3 style="margin: 10px 0;">Paste Your Abstract</h3>
-                <textarea id="lit-publish-text" style="width: 100%; height: 150px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); padding: 15px; color: white; border-radius: 8px;" placeholder="Paste your abstract here..."></textarea>
-                <button class="primary-btn mt-10" id="lit-publish-btn" style="width:100%;">Suggest Journals</button>
-            </div>
-        `);
-    }
-
-    function getNotesHTML() {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px;">
-                <h2>Notes & Equations Editor</h2>
-                <p>Write your ideas seamlessly with interactive equation support.</p>
-            </div>
-            <div class="tool-layout">
-                <div class="history-sidebar glass-panel" style="padding: 20px;">
-                    <div class="panel-header" style="padding-bottom:10px; margin-bottom:10px;">
-                        <h3 style="font-size: 1rem;">Saved Notes</h3>
-                    </div>
-                    <div id="notes-history-list" style="overflow-y:auto; flex-grow:1; padding-right: 5px;"></div>
-                </div>
-                <div class="main-tool-area">
-                    <div class="editor-layout">
-                        <div class="editor-panel glass-panel">
-                            <div class="editor-toolbar">
-                                <button><i class="ri-bold"></i></button><button><i class="ri-italic"></i></button>
-                                <button><i class="ri-h-1"></i></button><button><i class="ri-omega"></i> Insert Math</button>
-                            </div>
-                            <textarea class="note-textarea" placeholder="Start typing your research notes... Use $$ for equations."></textarea>
-                        </div>
-                        <div class="preview-panel glass-panel">
-                            <h3>Equation Preview</h3>
-                            <div class="equation-rendered">
-                                <p>Live LaTeX rendering enabled.</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function getDraftHTML() {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px;">
-                <h2>Thesis Draft Writing</h2>
-                <p>Draft your thesis chapters with AI assistance.</p>
-            </div>
-            <div class="tool-layout">
-                <div class="history-sidebar glass-panel" style="padding: 20px;">
-                    <div class="panel-header" style="padding-bottom:10px; margin-bottom:10px;">
-                        <h3 style="font-size: 1rem;">Saved Drafts</h3>
-                    </div>
-                    <div id="draft-history-list" style="overflow-y:auto; flex-grow:1; padding-right: 5px;"></div>
-                </div>
-                <div class="main-tool-area">
-                    <div class="editor-layout">
-                        <div class="editor-panel glass-panel" style="flex: 2;">
-                            <div class="editor-toolbar">
-                                <button><i class="ri-bold"></i></button><button><i class="ri-italic"></i></button>
-                                <button><i class="ri-underline"></i></button>
-                                <div style="width: 1px; height: 20px; background: rgba(255,255,255,0.2); margin: 0 10px;"></div>
-                                <button><i class="ri-h-1"></i></button><button><i class="ri-h-2"></i></button>
-                                <button><i class="ri-list-unordered"></i></button><button><i class="ri-list-ordered"></i></button>
-                            </div>
-                            <textarea id="draft-textarea" class="note-textarea" style="height: 60vh; font-family: 'Inter', sans-serif;" placeholder="Begin writing your thesis draft here... AI can help you paraphrase, expand, or summarize your work."></textarea>
-                        </div>
-                        <div class="action-panel glass-panel" style="flex: 1; display: flex; flex-direction: column; gap: 15px;">
-                            <h3>AI Writing Assistant</h3>
-                            <button class="action-btn" style="width: 100%; justify-content: center;"><i class="ri-text-wrap"></i> Paraphrase Selection</button>
-                            <button class="action-btn" style="width: 100%; justify-content: center;"><i class="ri-menu-add-line"></i> Expand Selection</button>
-                            <button class="action-btn" style="width: 100%; justify-content: center;"><i class="ri-check-double-line"></i> Check Grammar</button>
-                            <hr style="border-color: rgba(255,255,255,0.1); margin: 10px 0;">
-                            <button id="draft-save-btn" class="primary-btn" style="width: 100%;">Save to Cloud</button>
-                            <button class="secondary-btn" style="width: 100%; background: transparent; border: 1px solid var(--glass-border); color: white; padding: 10px; border-radius: 8px;">Export as PDF</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function getLatexHTML() {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px;">
-                <h2>Word to LaTeX Converter</h2>
-                <p>Convert your .docx manuscripts into journal-ready LaTeX code instantly.</p>
-            </div>
-            <div class="tool-layout">
-                <div class="history-sidebar glass-panel" style="padding: 20px;">
-                    <div class="panel-header" style="padding-bottom:10px; margin-bottom:10px;">
-                        <h3 style="font-size: 1rem;">Past Conversions</h3>
-                    </div>
-                    <div id="latex-history-list" style="overflow-y:auto; flex-grow:1; padding-right: 5px;"></div>
-                </div>
-                <div class="main-tool-area">
-                    <div class="upload-zone glass-panel text-center">
-                        <i class="ri-file-word-line" style="font-size: 4rem; color: #3b82f6;"></i>
-                        <h3 style="margin-top: 20px;">Drag & Drop your Word Document</h3>
-                        <p class="stat-sub" style="margin: 10px 0 20px;">Supports .doc, .docx (Equations and Images preserved)</p>
-                        <button class="primary-btn">Browse Cloud Files</button>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function getEditingHTML() {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px;">
-                <h2>AI Editing Tools Suite</h2>
-                <p>Select a tool below to perfect your manuscript with our advanced AI agents.</p>
-            </div>
-            <div class="tool-grid">
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-edit-grammar">
-                    <i class="ri-spellcheck tool-icon"></i><h3>Grammar Checker</h3><p>Fix grammatical errors and enhance clarity.</p>
-                </div>
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-edit-plag-scan">
-                    <i class="ri-file-shield-2-line tool-icon text-green"></i><h3>Plagiarism Checker</h3><p>Scan document for unoriginal content.</p>
-                </div>
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-edit-plag-rem">
-                    <i class="ri-eraser-line tool-icon text-red"></i><h3>Plagiarism Remover</h3><p>Re-write sections to ensure originality.</p>
-                </div>
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-edit-para">
-                    <i class="ri-text-wrap tool-icon text-purple"></i><h3>Paraphrasing Tool</h3><p>Enhance the flow and vocabulary of a section.</p>
-                </div>
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-edit-ai-chk">
-                    <i class="ri-robot-2-line tool-icon text-blue"></i><h3>AI Checker</h3><p style="font-size:0.8rem; margin:10px 0;">Check if text is AI-generated.</p>
-                </div>
-                <div class="tool-card glass-panel" style="background: rgba(0,0,0,0.2); cursor:pointer;" id="hub-edit-reduce">
-                    <i class="ri-compress-right-line tool-icon text-pink"></i><h3>AI Reducer</h3><p style="font-size:0.8rem; margin:10px 0;">Summarize and condense lengthy text.</p>
-                </div>
-            </div>
-        `;
-    }
-
-    function getEditSubToolFrame(toolId, title, desc, historyLabel, inputsHTML) {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px; display:flex; justify-content:space-between; align-items:flex-start;">
-                <div><h2>${title}</h2><p>${desc}</p></div>
-                <button class="secondary-btn" id="edit-back-btn"><i class="ri-arrow-left-line"></i> Back to Hub</button>
-            </div>
-            <div class="tool-layout">
-                <div class="history-sidebar glass-panel" style="padding: 20px;">
-                    <div class="panel-header" style="padding-bottom:10px; margin-bottom:10px;">
-                        <h3 style="font-size: 1rem;">${historyLabel}</h3>
-                    </div>
-                    <div id="${toolId}-history-list" style="overflow-y:auto; flex-grow:1; padding-right: 5px;">
-                        <div class="history-item"><div class="history-title">Chapter 3 Editing</div></div>
-                        <div class="history-item"><div class="history-title">Conclusion Rewrite</div></div>
-                    </div>
-                </div>
-                <div class="main-tool-area glass-panel" style="padding: 20px; overflow-y: auto;">
-                    ${inputsHTML}
-                    <div id="${toolId}-output-area" style="margin-top: 24px; display: none;">
-                        <h3 style="margin-bottom: 12px; border-bottom: 1px solid rgba(0,0,0,0.1); padding-bottom: 10px;">AI Result</h3>
-                        <div class="message ai-msg" id="${toolId}-output-content" style="white-space: pre-wrap; margin-top: 10px; margin-bottom: 15px; width:100%; max-width:100%;"></div>
-                        <div style="display:flex; justify-content:flex-end; gap:10px;">
-                            <button class="action-btn" onclick="copyToClipboard('${toolId}-output-content')" style="padding: 8px 16px; font-size: 0.95rem; border-color:var(--accent-primary); color:var(--accent-primary); background:transparent;"><i class="ri-file-copy-line"></i> Copy Text</button>
-                            <button class="primary-btn" onclick="downloadAsWord('${toolId}-output-content', '${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}')" style="padding: 8px 16px; font-size: 0.95rem; display:flex; align-items:center; gap:8px;"><i class="ri-download-line"></i> Download .doc</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function getGrammarHTML() {
-        return getEditSubToolFrame('edit-grammar', 'Grammar Checker', 'Paste text to check and fix grammatical errors.', 'Past Checks', `
-            <textarea id="edit-grammar-text" style="width: 100%; height: 200px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); padding: 15px; color: white; border-radius: 8px;" placeholder="Paste text here..."></textarea>
-            <button class="primary-btn mt-10" id="edit-grammar-btn" style="width:100%;">Check Grammar</button>
-        `);
-    }
-
-    function getPlagScanHTML() {
-        return getEditSubToolFrame('edit-plag-scan', 'Plagiarism Checker', 'Paste text to scan for unoriginal content patterns.', 'Past Scans', `
-            <textarea id="edit-plag-scan-text" style="width: 100%; height: 200px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); padding: 15px; color: white; border-radius: 8px;" placeholder="Paste text here..."></textarea>
-            <button class="primary-btn mt-10" id="edit-plag-scan-btn" style="width:100%;">Scan Document</button>
-        `);
-    }
-
-    function getPlagRemHTML() {
-        return getEditSubToolFrame('edit-plag-rem', 'Plagiarism Remover', 'Paste flagged text to rewrite ensure originality.', 'Saved Rewrites', `
-            <textarea id="edit-plag-rem-text" style="width: 100%; height: 200px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); padding: 15px; color: white; border-radius: 8px;" placeholder="Paste text here..."></textarea>
-            <button class="primary-btn mt-10" id="edit-plag-rem-btn" style="width:100%;">Rewrite Text</button>
-        `);
-    }
-
-    function getParaphraseHTML() {
-        return getEditSubToolFrame('edit-para', 'Paraphrasing Tool', 'Enhance the flow and vocabulary of a section.', 'Past Paraphrases', `
-            <textarea id="edit-para-text" style="width: 100%; height: 200px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); padding: 15px; color: white; border-radius: 8px;" placeholder="Paste text here..."></textarea>
-            <button class="primary-btn mt-10" id="edit-para-btn" style="width:100%;">Paraphrase Section</button>
-        `);
-    }
-
-    function getAiCheckHTML() {
-        return getEditSubToolFrame('edit-ai-chk', 'AI Content Checker', 'Check if a manuscript section was likely AI-generated.', 'Past Checks', `
-            <textarea id="edit-ai-chk-text" style="width: 100%; height: 200px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); padding: 15px; color: white; border-radius: 8px;" placeholder="Paste text here..."></textarea>
-            <button class="primary-btn mt-10" id="edit-ai-chk-btn" style="width:100%;">Analyze AI Likelihood</button>
-        `);
-    }
-
-    function getAiReduceHTML() {
-        return getEditSubToolFrame('edit-reduce', 'AI Reducer', 'Summarize and condense lengthy text.', 'Past Summaries', `
-            <textarea id="edit-reduce-text" style="width: 100%; height: 200px; background: rgba(0,0,0,0.2); border: 1px solid var(--glass-border); padding: 15px; color: white; border-radius: 8px;" placeholder="Paste lengthy text here..."></textarea>
-            <button class="primary-btn mt-10" id="edit-reduce-btn" style="width:100%;">Summarize Text</button>
-        `);
-    }
-
-    function getChatPdfHTML() {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px;">
-                <h2>Chat with PDF</h2>
-                <p>Upload a document and interact with it intelligently.</p>
-            </div>
-            <div class="tool-layout">
-                <div class="history-sidebar glass-panel" style="padding: 20px;">
-                    <div class="panel-header" style="padding-bottom:10px; margin-bottom:10px;">
-                        <h3 style="font-size: 1rem;">Past Documents</h3>
-                    </div>
-                    <div id="chatpdf-history-list" style="overflow-y:auto; flex-grow:1; padding-right: 5px;"></div>
-                </div>
-                <div class="main-tool-area">
-                    <div class="split-view">
-                        <div class="pdf-viewer glass-panel" style="display:flex; flex-direction:column;">
-                            <div class="panel-header" style="flex-shrink:0;"><h3>PDF Viewer</h3>
-                                <input type="file" id="pdf-upload-input" accept=".pdf" style="display:none;">
-                                <button class="icon-btn" id="pdf-upload-btn" title="Upload PDF"><i class="ri-upload-cloud-2-line"></i></button>
-                            </div>
-                            <div class="mock-pdf" id="pdf-render-area" style="flex-grow:1; display:flex; padding:0;">
-                                <div style="margin: auto; color: var(--text-muted); padding: 20px;">Please upload a PDF to interact with it.</div>
-                            </div>
-                        </div>
-                        <div class="chat-interface glass-panel">
-                            <div class="chat-messages">
-                                <div class="message ai-msg">Upload a PDF using the cloud button to get started!</div>
-                            </div>
-                            <div class="chat-input-area">
-                                <input type="text" placeholder="Ask about this paper...">
-                                <button class="send-btn"><i class="ri-send-plane-fill"></i></button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function getChatbotHTML() {
-        return `
-            <div class="chatbot-container glass-panel">
-                <div class="chatbot-header">
-                    <div class="bot-avatar" style="padding:0; overflow:hidden; border-radius:50%;">
-                        <svg width="100%" height="100%" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-                          <defs>
-                            <radialGradient id="galaxy-bg" cx="50%" cy="50%" r="50%">
-                              <stop offset="0%" style="stop-color:#8A2BE2;stop-opacity:1" />
-                              <stop offset="50%" style="stop-color:#0000FF;stop-opacity:1" />
-                              <stop offset="100%" style="stop-color:#000000;stop-opacity:1" />
-                            </radialGradient>
-                            <linearGradient id="metallic-gold" x1="0%" y1="0%" x2="100%" y2="0%">
-                              <stop offset="0%" style="stop-color:#FFD700" />
-                              <stop offset="50%" style="stop-color:#FFA500" />
-                              <stop offset="100%" style="stop-color:#FFD700" />
-                            </linearGradient>
-                          </defs>
-                          <circle cx="50" cy="50" r="50" fill="url(#galaxy-bg)" />
-                          <circle cx="20" cy="20" r="1" fill="white" />
-                          <circle cx="80" cy="15" r="1" fill="white" />
-                          <circle cx="15" cy="70" r="1" fill="white" />
-                          <circle cx="85" cy="80" r="1" fill="white" />
-                          <circle cx="50" cy="10" r="1" fill="white" />
-                          <circle cx="90" cy="50" r="1" fill="white" />
-                          <circle cx="10" cy="50" r="1" fill="white" />
-                          <circle cx="50" cy="90" r="1" fill="white" />
-                          <circle cx="50" cy="50" r="40" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
-                          <circle cx="50" cy="50" r="30" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
-                          <circle cx="50" cy="50" r="20" fill="none" stroke="url(#metallic-gold)" stroke-width="3" />
-                          <circle cx="50" cy="50" r="3" fill="url(#metallic-gold)" />
-                        </svg>
-                    </div>
-                    <div>
-                        <h3>Parama</h3>
-                        <p class="stat-sub">ImRa Chief AI Assistant</p>
-                    </div>
-                </div>
-                <div class="chat-messages full-chat">
-                    <div class="message ai-msg">Greetings, Scholar! I am Parama. I can guide you through ImRa, help you brainstorm problem statements, or analyze your research data. How can I assist you today?</div>
-                </div>
-                <div class="chat-input-area">
-                    <button class="attach-btn"><i class="ri-attachment-2"></i></button>
-                    <input type="text" placeholder="Type a message to Parama...">
-                    <button class="send-btn"><i class="ri-send-plane-fill"></i></button>
-                </div>
-            </div>
-        `;
-    }
-
-    function getParuHTML() {
-        return `
-            <div class="dashboard-header" style="margin-bottom: 16px;">
-                <h2>Paru 🌟 - Advanced Multi-Role AI</h2>
-                <p>Creator, Author, Researcher, and Helper. Powered by advanced reasoning.</p>
-            </div>
-            <div class="paru-layout">
-                <div class="history-sidebar glass-panel" style="padding: 20px;">
-                    <div class="panel-header" style="padding-bottom:10px; margin-bottom:10px;">
-                        <h3 style="font-size: 1rem;">Chat History</h3>
-                        <button class="icon-btn" id="new-paru-chat" title="New Chat"><i class="ri-add-line"></i></button>
-                    </div>
-                    <div id="paru-history-list" style="overflow-y:auto; flex-grow:1; padding-right: 5px;">
-                        <!-- Groups injected via JS -->
-                        <div style="text-align:center; padding: 20px 0; color:var(--text-muted); font-size:0.8rem;">Loading history...</div>
-                    </div>
-                </div>
-                <div class="chat-interface glass-panel">
-                    <div class="chatbot-header" style="padding: 12px 20px;">
-                        <div class="bot-avatar" style="padding:0; overflow:hidden; border-radius:50%;">
-                            <svg width="100%" height="100%" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-                              <defs>
-                                <radialGradient id="paru-galaxy-bg" cx="50%" cy="50%" r="50%">
-                                  <stop offset="0%" style="stop-color:#87CEFA;stop-opacity:1" />
-                                  <stop offset="50%" style="stop-color:#00BFFF;stop-opacity:1" />
-                                  <stop offset="100%" style="stop-color:#000022;stop-opacity:1" />
-                                </radialGradient>
-                                <linearGradient id="paru-metallic" x1="0%" y1="0%" x2="100%" y2="0%">
-                                  <stop offset="0%" style="stop-color:#B0E0E6" />
-                                  <stop offset="50%" style="stop-color:#ADD8E6" />
-                                  <stop offset="100%" style="stop-color:#B0E0E6" />
-                                </linearGradient>
-                              </defs>
-                              <circle cx="50" cy="50" r="50" fill="url(#paru-galaxy-bg)" />
-                              <circle cx="20" cy="20" r="1" fill="white" />
-                              <circle cx="80" cy="15" r="1" fill="white" />
-                              <circle cx="15" cy="70" r="1" fill="white" />
-                              <circle cx="85" cy="80" r="1" fill="white" />
-                              <circle cx="50" cy="10" r="1" fill="white" />
-                              <circle cx="90" cy="50" r="1" fill="white" />
-                              <circle cx="10" cy="50" r="1" fill="white" />
-                              <circle cx="50" cy="90" r="1" fill="white" />
-                              <circle cx="50" cy="50" r="40" fill="none" stroke="url(#paru-metallic)" stroke-width="3" />
-                              <circle cx="50" cy="50" r="30" fill="none" stroke="url(#paru-metallic)" stroke-width="3" />
-                              <circle cx="50" cy="50" r="20" fill="none" stroke="url(#paru-metallic)" stroke-width="3" />
-                              <circle cx="50" cy="50" r="3" fill="url(#paru-metallic)" />
-                            </svg>
-                        </div>
-                        <div>
-                            <h3 style="margin-bottom:0;">Paaru 🌟</h3>
-                            <p class="stat-sub" style="margin-top:2px;">Advanced Mode Active</p>
-                        </div>
-                    </div>
-                    <div class="chat-messages" id="paru-chat-messages" style="height: auto; flex-grow: 1;">
-                        <div class="message ai-msg">Welcome! I am Paru. I am ready to assist you as a creator, an author, a researcher, or a helper depending on what you need. What shall we explore today?</div>
-                    </div>
-                    <div class="chat-input-area">
-                        <input type="text" id="paru-chat-input" placeholder="Ask Paru for deep analysis or creative writing...">
-                        <button class="send-btn" id="paru-send-btn"><i class="ri-send-plane-fill"></i></button>
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function setupChatInteractions() {
-        const inputs = document.querySelectorAll('.chat-input-area input');
-        const sendBtns = document.querySelectorAll('.send-btn');
-        
-        sendBtns.forEach((btn, index) => {
-            // Only affect the default general chat interactions (like ChatPDF), skip Paru which is handled separately
-            if(btn.id === 'paru-send-btn') return;
-            
-            btn.addEventListener('click', async () => {
-                const input = inputs[index];
-                if(input.value.trim() !== '') {
-                    const userText = input.value;
-                    const msgContainer = input.closest('.glass-panel').querySelector('.chat-messages');
-                    msgContainer.innerHTML += '<div class="message user-msg">' + userText + '</div>';
-                    input.value = '';
-                    msgContainer.scrollTop = msgContainer.scrollHeight;
-                    
-                    const currentUser = auth.currentUser;
-                    if(currentUser) saveChatMessage(currentUser.uid, 'user', userText);
-                    
-                    const typingId = "typing-" + Date.now();
-                    msgContainer.innerHTML += '<div class="message ai-msg" id="' + typingId + '">Parama is thinking...</div>';
-                    msgContainer.scrollTop = msgContainer.scrollHeight;
-                    
-                    const aiResponse = await fetchGeminiResponse(userText);
-                    
-                    if(currentUser) saveChatMessage(currentUser.uid, 'ai', aiResponse);
-                    
-                    const typingEl = document.getElementById(typingId);
-                    if(typingEl) typingEl.remove();
-                    
-                    const formattedResponse = aiResponse.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\n/g, '<br>');
-                    msgContainer.innerHTML += '<div class="message ai-msg">' + formattedResponse + '</div>';
-                    msgContainer.scrollTop = msgContainer.scrollHeight;
-                }
-            });
-        });
-    }
-
-    async function fetchGeminiResponse(prompt) {
-        try {
-            const genAI = new GoogleGenerativeAI("AIzaSyBYNhCMj8o0me2Wh9p-Mfz006LbLAvLpxY");
-            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
-            const result = await model.generateContent("You are Parama, the highly intelligent MALE Chief AI Assistant for the ImRa Research platform. You identify as a male assistant. Be helpful, enthusiastic, clear, and academic. The user says: " + prompt);
-            return result.response.text();
-        } catch(err) {
-            console.error(err);
-            return "Connection Error: Please ensure you are running via VS Code Live Server. " + err.message;
-        }
-    }
-
-    async function fetchProfessionalResponse(prompt) {
-        try {
-            const genAI = new GoogleGenerativeAI("AIzaSyBYNhCMj8o0me2Wh9p-Mfz006LbLAvLpxY");
-            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
-            const result = await model.generateContent("You are a professional academic research assistant. Provide direct, clear, and well-structured responses. Do not introduce yourself or use unnecessary preamble. Focus on delivering substantive, academic content. " + prompt);
-            return result.response.text();
-        } catch(err) {
-            console.error(err);
-            return "Connection Error: Please ensure you are running via VS Code Live Server. " + err.message;
-        }
-    }
-
-    // --- Paru Integration ---
-
-    async function saveParuMessage(userId, role, text) {
-        if(!userId) return;
-        try {
-            await addDoc(collection(db, "paruHistory", userId, "messages"), {
-                role: role,
-                text: text,
-                timestamp: serverTimestamp()
-            });
-        } catch(err) {
-            console.error("Error saving Paru message", err);
-        }
-    }
-
-    async function loadParuHistory(userId) {
-        if(!userId) return;
-        const historyList = document.getElementById('paru-history-list');
-        const messagesContainer = document.getElementById('paru-chat-messages');
-        if(!historyList || !messagesContainer) return;
-        
-        try {
-            const q = query(collection(db, "paruHistory", userId, "messages"), orderBy("timestamp"));
-            const snapshot = await getDocs(q);
-            
-            if(snapshot.empty) {
-                historyList.innerHTML = '<div style="text-align:center; padding: 20px 0; color:var(--text-muted); font-size:0.8rem;">No history found.</div>';
-                return;
-            }
-
-            const grouped = {};
-            let htmlMsg = '';
-            
-            snapshot.forEach(doc => {
-                const data = doc.data();
-                if(!data.timestamp) return;
-                const d = data.timestamp.toDate();
-                const dateKey = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
-                
-                if(!grouped[dateKey]) grouped[dateKey] = [];
-                grouped[dateKey].push(data);
-                
-                const cssClass = data.role === 'user' ? 'user-msg' : 'ai-msg';
-                let formattedResponse = data.text;
-                if(data.role === 'ai') {
-                    formattedResponse = formattedResponse.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\n/g, '<br>');
-                }
-                htmlMsg += `<div class="message ${cssClass}">${formattedResponse}</div>`;
-            });
-            
-            let htmlSidebar = '';
-            Object.keys(grouped).reverse().forEach(date => {
-                htmlSidebar += `<div class="history-group">
-                    <h4>${date}</h4>
-                    <div class="history-item">Chat spanning ${grouped[dateKey].length} messages</div>
-                </div>`;
-            });
-            
-            historyList.innerHTML = htmlSidebar;
-            
-            if(htmlMsg !== '') {
-                messagesContainer.innerHTML = htmlMsg;
-                messagesContainer.scrollTop = messagesContainer.scrollHeight;
-            }
-            
-        } catch(err) {
-            console.error("Error loading Paru history", err);
-            historyList.innerHTML = '<div style="text-align:center; padding: 20px 0; color:var(--text-muted); font-size:0.8rem;">Failed to load.</div>';
-        }
-    }
-
-    // --- Global Tool History & Export Managers ---
     
-    window.copyToClipboard = function(elementId) {
-        const el = document.getElementById(elementId);
-        if(el) {
-            navigator.clipboard.writeText(el.innerText).then(() => {
-                alert("Copied directly to your clipboard!");
-            });
-        }
-    };
-
-    window.downloadAsWord = function(elementId, filename) {
-        const el = document.getElementById(elementId);
-        if(!el) return;
-        const preHtml = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Export</title></head><body>";
-        const postHtml = "</body></html>";
-        const html = preHtml + "<div style='font-family: Arial, sans-serif;'>" + el.innerHTML + "</div>" + postHtml;
-        const blob = new Blob(['\\ufeff', html], { type: 'application/msword' });
-        const url = 'data:application/vnd.ms-word;charset=utf-8,' + encodeURIComponent(html);
-        const name = filename ? filename + '.doc' : 'document.doc';
-        const downloadLink = document.createElement("a");
-        document.body.appendChild(downloadLink);
-        if(navigator.msSaveOrOpenBlob){
-            navigator.msSaveOrOpenBlob(blob, name);
-        }else{
-            downloadLink.href = url;
-            downloadLink.download = name;
-            downloadLink.click();
-        }
-        document.body.removeChild(downloadLink);
-    };
-
-    window.openHistoryViewer = function(title, rawText) {
-        const mainArea = document.querySelector('.main-tool-area');
-        if(!mainArea) return;
-        
-        Array.from(mainArea.children).forEach(child => {
-            if(!child.classList.contains('history-viewer-overlay')) {
-                // Save original display style in a data attribute if needed, but usually empty string restores it.
-                if(!child.hasAttribute('data-original-display')) {
-                    child.setAttribute('data-original-display', child.style.display);
-                }
-                child.style.display = 'none';
-                child.classList.add('hidden-by-viewer');
-            }
-        });
-        
-        const oldViewer = mainArea.querySelector('.history-viewer-overlay');
-        if(oldViewer) oldViewer.remove();
-        
-        const viewer = document.createElement('div');
-        viewer.className = 'history-viewer-overlay glass-panel';
-        viewer.style.cssText = 'height: 100%; display: flex; flex-direction: column; padding: 0; animation: fadeIn 0.3s ease;';
-        
-        const formatted = rawText.replace(/\\n/g, '<br>').replace(/\\*\\*(.*?)\\*\\*/g, '<b>$1</b>');
-        
-        viewer.innerHTML = `
-            <div class="panel-header" style="padding: 20px; border-bottom:1px solid rgba(255,255,255,0.1); display:flex; justify-content:space-between; align-items:center;">
-                <h2 style="margin:0; font-size: 1.4rem;">${title}</h2>
-                <button class="secondary-btn" onclick="closeHistoryViewer()" style="font-size:0.85rem; padding: 6px 12px;"><i class="ri-arrow-left-line"></i> Close View</button>
-            </div>
-            <div class="viewer-content" style="flex-grow:1; padding: 20px; overflow-y:auto; line-height:1.6; font-size: 0.95rem;">
-                ${formatted}
-            </div>
+    // Live preview
+    textarea.addEventListener("input", () => {
+      const val = textarea.value;
+      const matches = val.match(/\$\$(.*?)\$\$/g);
+      const equations = [];
+      if (matches) {
+        matches.forEach(m => equations.push(m.slice(2, -2)));
+      }
+      if (equations.length === 0) {
+        preview.innerHTML = "<p>Live LaTeX rendering enabled. Wrap equations in $$ (e.g. $$E=mc^2$$) to preview.</p>";
+      } else {
+        preview.innerHTML = `
+          <h4>Rendered Equations</h4>
+          <div style="display:flex; flex-direction:column; gap:12px; margin-top:10px;">
+            ${equations.map(eq => `<div style="background:rgba(255,255,255,0.8); color:black; padding:15px; border-radius:8px; text-align:center; font-family:'Courier New', monospace; font-size:1.1rem; border:1px solid var(--glass-border);">${escapeHtml(eq)}</div>`).join("")}
+          </div>
         `;
-        
-        mainArea.appendChild(viewer);
+      }
+    });
+  }
+
+  if (saveBtn && textarea) {
+    saveBtn.onclick = async () => {
+      const content = textarea.value;
+      await saveCloudDocument(auth.currentUser.uid, "notes", content);
+      await saveToolHistory(auth.currentUser.uid, "notes", "Research Notes Save", content);
+      loadToolHistoryInUI("notes", "notes-history-list");
+      toast("Notes saved successfully.");
+    };
+  }
+
+  // Bind note toolbar buttons
+  document.getElementById("editor-bold-btn").onclick = () => wrapTextSelection(textarea, "**", "**");
+  document.getElementById("editor-italic-btn").onclick = () => wrapTextSelection(textarea, "*", "*");
+  document.getElementById("editor-header-btn").onclick = () => wrapTextSelection(textarea, "# ", "");
+  document.getElementById("editor-math-btn").onclick = () => wrapTextSelection(textarea, "$$", "$$");
+}
+
+function wrapTextSelection(textarea, prefix, suffix) {
+  if (!textarea) return;
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const text = textarea.value;
+  const selected = text.substring(start, end);
+  const replacement = prefix + selected + suffix;
+  textarea.value = text.substring(0, start) + replacement + text.substring(end);
+  textarea.focus();
+  textarea.setSelectionRange(start + prefix.length, start + prefix.length + selected.length);
+  textarea.dispatchEvent(new Event("input"));
+}
+
+function setupDraftInteractions() {
+  loadToolHistoryInUI("draft", "draft-history-list");
+  const textarea = document.getElementById("draft-textarea");
+  const saveBtn = document.getElementById("draft-save-btn");
+  const submitBtn = document.getElementById("draft-submit-btn");
+  
+  const paraBtn = document.getElementById("draft-paraphrase-btn");
+  const expandBtn = document.getElementById("draft-expand-btn");
+  const grammarBtn = document.getElementById("draft-grammar-btn");
+
+  if (textarea) {
+    loadCloudDocument(auth.currentUser.uid, "draft").then(val => {
+      textarea.value = val;
+    });
+  }
+
+  if (saveBtn && textarea) {
+    saveBtn.onclick = async () => {
+      const content = textarea.value;
+      await saveCloudDocument(auth.currentUser.uid, "draft", content);
+      await saveToolHistory(auth.currentUser.uid, "draft", "Draft Save", content);
+      loadToolHistoryInUI("draft", "draft-history-list");
+      toast("Draft saved successfully.");
+    };
+  }
+
+  if (submitBtn && textarea) {
+    submitBtn.onclick = async () => {
+      if (!textarea.value.trim()) return alert("Please write a draft before submitting.");
+      if (!myProfile.supervisorId) return alert("Select a supervisor first in profile setup.");
+
+      const title = prompt("Enter chapter title / description:", "Thesis Chapter Draft");
+      if (!title) return;
+
+      await createSubmission({
+        scholarId: auth.currentUser.uid,
+        supervisorId: myProfile.supervisorId,
+        title,
+        content: textarea.value,
+        type: "draft"
+      });
+      toast("Draft submitted to supervisor successfully!");
+    };
+  }
+
+  // AI draft helpers
+  if (paraBtn && textarea) {
+    paraBtn.onclick = async () => {
+      const selectedText = getSelectionOrAll(textarea);
+      if (!selectedText) return;
+      const originalBtnText = paraBtn.innerText;
+      paraBtn.innerText = "Processing...";
+      try {
+        const response = await callApi("/api/draft/paraphrase", { text: selectedText });
+        replaceSelectionOrAll(textarea, response);
+        toast("Paraphrased selection.");
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        paraBtn.innerText = originalBtnText;
+      }
+    };
+  }
+
+  if (expandBtn && textarea) {
+    expandBtn.onclick = async () => {
+      const selectedText = getSelectionOrAll(textarea);
+      if (!selectedText) return;
+      const originalBtnText = expandBtn.innerText;
+      expandBtn.innerText = "Processing...";
+      try {
+        const response = await callApi("/api/draft/expand", { text: selectedText });
+        replaceSelectionOrAll(textarea, response);
+        toast("Expanded selection.");
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        expandBtn.innerText = originalBtnText;
+      }
+    };
+  }
+
+  if (grammarBtn && textarea) {
+    grammarBtn.onclick = async () => {
+      const selectedText = getSelectionOrAll(textarea);
+      if (!selectedText) return;
+      const originalBtnText = grammarBtn.innerText;
+      grammarBtn.innerText = "Processing...";
+      try {
+        const response = await callApi("/api/draft/grammar", { text: selectedText });
+        replaceSelectionOrAll(textarea, response);
+        toast("Grammar checked.");
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        grammarBtn.innerText = originalBtnText;
+      }
+    };
+  }
+
+  // Toolbar
+  document.getElementById("draft-bold-btn").onclick = () => wrapTextSelection(textarea, "**", "**");
+  document.getElementById("draft-italic-btn").onclick = () => wrapTextSelection(textarea, "*", "*");
+  document.getElementById("draft-underline-btn").onclick = () => wrapTextSelection(textarea, "<u>", "</u>");
+}
+
+function getSelectionOrAll(textarea) {
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  if (start === end) return textarea.value.trim();
+  return textarea.value.substring(start, end).trim();
+}
+
+function replaceSelectionOrAll(textarea, replacement) {
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  if (start === end) {
+    textarea.value = replacement;
+  } else {
+    textarea.value = textarea.value.substring(0, start) + replacement + textarea.value.substring(end);
+  }
+}
+
+function setupLatexInteractions() {
+  loadToolHistoryInUI("latex", "latex-history-list");
+  const fileInput = document.getElementById("latex-upload-file");
+  const outArea = document.getElementById("latex-output-area");
+  const outContent = document.getElementById("latex-output-content");
+  const copyBtn = document.getElementById("latex-copy-btn");
+
+  if (fileInput) {
+    fileInput.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      outArea.style.display = "block";
+      outContent.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> Converting manuscript...';
+      const text = await extractTextFromDocx(file);
+
+      try {
+        const response = await callApi("/api/latex/convert", { text: text.substring(0, 15000) });
+        outContent.innerText = response;
+        await saveToolHistory(auth.currentUser.uid, "latex", "LaTeX conversion", response);
+        loadToolHistoryInUI("latex", "latex-history-list");
+      } catch (err) {
+        outContent.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+
+  if (copyBtn && outContent) {
+    copyBtn.onclick = () => {
+      navigator.clipboard.writeText(outContent.innerText);
+      toast("LaTeX code copied.");
+    };
+  }
+}
+
+function setupEditingInteractions() {
+  const content = document.getElementById("dashboard-content");
+
+  const e1 = document.getElementById("hub-edit-grammar");
+  if (e1) e1.onclick = () => { content.innerHTML = getGrammarHTML(); setupGrammarInteractions(); };
+
+  const e2 = document.getElementById("hub-edit-plag-scan");
+  if (e2) e2.onclick = () => { content.innerHTML = getPlagScanHTML(); setupPlagScanInteractions(); };
+
+  const e3 = document.getElementById("hub-edit-plag-rem");
+  if (e3) e3.onclick = () => { content.innerHTML = getPlagRemHTML(); setupPlagRemInteractions(); };
+
+  const e4 = document.getElementById("hub-edit-para");
+  if (e4) e4.onclick = () => { content.innerHTML = getParaphraseHTML(); setupParaphraseInteractions(); };
+
+  const e5 = document.getElementById("hub-edit-ai-chk");
+  if (e5) e5.onclick = () => { content.innerHTML = getAiCheckHTML(); setupAiCheckInteractions(); };
+
+  const e6 = document.getElementById("hub-edit-reduce");
+  if (e6) e6.onclick = () => { content.innerHTML = getAiReduceHTML(); setupAiReduceInteractions(); };
+}
+
+function attachEditBackBtn() {
+  const btn = document.getElementById("edit-back-btn");
+  if (btn) {
+    btn.onclick = () => {
+      document.getElementById("dashboard-content").innerHTML = getEditingHTML();
+      setupEditingInteractions();
+    };
+  }
+}
+
+function bindCopySimple(toolId) {
+  const btn = document.getElementById(`${toolId}-copy-btn`);
+  const content = document.getElementById(`${toolId}-output-content`);
+  if (btn && content) {
+    btn.onclick = () => {
+      navigator.clipboard.writeText(content.innerText);
+      toast("Result copied.");
+    };
+  }
+}
+
+function setupGrammarInteractions() {
+  loadToolHistoryInUI("edit-grammar", "edit-grammar-history-list");
+  attachEditBackBtn();
+  const btn = document.getElementById("edit-grammar-btn");
+  const textarea = document.getElementById("edit-grammar-text");
+  if (btn && textarea) {
+    btn.onclick = async () => {
+      const text = textarea.value.trim();
+      if (!text) return alert("Enter text first.");
+      const out = subToolLoading("edit-grammar", "Reviewing text structure");
+
+      try {
+        const response = await callApi("/api/editing/grammar", { text });
+        out.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "edit-grammar", "Grammar Check", response);
+        loadToolHistoryInUI("edit-grammar", "edit-grammar-history-list");
+        bindCopySimple("edit-grammar");
+      } catch (err) {
+        out.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupPlagScanInteractions() {
+  loadToolHistoryInUI("edit-plag-scan", "edit-plag-scan-history-list");
+  attachEditBackBtn();
+  const btn = document.getElementById("edit-plag-scan-btn");
+  const textarea = document.getElementById("edit-plag-scan-text");
+  if (btn && textarea) {
+    btn.onclick = async () => {
+      const text = textarea.value.trim();
+      if (!text) return alert("Enter text first.");
+      const out = subToolLoading("edit-plag-scan", "Scanning for matches");
+
+      try {
+        const response = await callApi("/api/editing/plagiarism-scan", { text });
+        out.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "edit-plag-scan", "Plagiarism Scan", response);
+        loadToolHistoryInUI("edit-plag-scan", "edit-plag-scan-history-list");
+        bindCopySimple("edit-plag-scan");
+      } catch (err) {
+        out.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupPlagRemInteractions() {
+  loadToolHistoryInUI("edit-plag-rem", "edit-plag-rem-history-list");
+  attachEditBackBtn();
+  const btn = document.getElementById("edit-plag-rem-btn");
+  const textarea = document.getElementById("edit-plag-rem-text");
+  if (btn && textarea) {
+    btn.onclick = async () => {
+      const text = textarea.value.trim();
+      if (!text) return alert("Enter text first.");
+      const out = subToolLoading("edit-plag-rem", "Rewriting content");
+
+      try {
+        const response = await callApi("/api/editing/plagiarism-remove", { text });
+        out.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "edit-plag-rem", "Plagiarism Rewrite", response);
+        loadToolHistoryInUI("edit-plag-rem", "edit-plag-rem-history-list");
+        bindCopySimple("edit-plag-rem");
+      } catch (err) {
+        out.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupParaphraseInteractions() {
+  loadToolHistoryInUI("edit-para", "edit-para-history-list");
+  attachEditBackBtn();
+  const btn = document.getElementById("edit-para-btn");
+  const textarea = document.getElementById("edit-para-text");
+  if (btn && textarea) {
+    btn.onclick = async () => {
+      const text = textarea.value.trim();
+      if (!text) return alert("Enter text first.");
+      const out = subToolLoading("edit-para", "Varying sentence vocabulary");
+
+      try {
+        const response = await callApi("/api/editing/paraphrase", { text });
+        out.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "edit-para", "Paraphrase", response);
+        loadToolHistoryInUI("edit-para", "edit-para-history-list");
+        bindCopySimple("edit-para");
+      } catch (err) {
+        out.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupAiCheckInteractions() {
+  loadToolHistoryInUI("edit-ai-chk", "edit-ai-chk-history-list");
+  attachEditBackBtn();
+  const btn = document.getElementById("edit-ai-chk-btn");
+  const textarea = document.getElementById("edit-ai-chk-text");
+  if (btn && textarea) {
+    btn.onclick = async () => {
+      const text = textarea.value.trim();
+      if (!text) return alert("Enter text first.");
+      const out = subToolLoading("edit-ai-chk", "Checking probability signatures");
+
+      try {
+        const response = await callApi("/api/editing/ai-check", { text });
+        out.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "edit-ai-chk", "AI Classifier Scan", response);
+        loadToolHistoryInUI("edit-ai-chk", "edit-ai-chk-history-list");
+        bindCopySimple("edit-ai-chk");
+      } catch (err) {
+        out.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupAiReduceInteractions() {
+  loadToolHistoryInUI("edit-reduce", "edit-reduce-history-list");
+  attachEditBackBtn();
+  const btn = document.getElementById("edit-reduce-btn");
+  const textarea = document.getElementById("edit-reduce-text");
+  if (btn && textarea) {
+    btn.onclick = async () => {
+      const text = textarea.value.trim();
+      if (!text) return alert("Enter text first.");
+      const out = subToolLoading("edit-reduce", "Extracting core paragraphs");
+
+      try {
+        const response = await callApi("/api/editing/reduce", { text });
+        out.innerHTML = formatAIText(response);
+        await saveToolHistory(auth.currentUser.uid, "edit-reduce", "Condensation summary", response);
+        loadToolHistoryInUI("edit-reduce", "edit-reduce-history-list");
+        bindCopySimple("edit-reduce");
+      } catch (err) {
+        out.innerHTML = `<span style="color:red;">Error: ${err.message}</span>`;
+      }
+    };
+  }
+}
+
+function setupChatPdfInteractions() {
+  loadToolHistoryInUI("chatpdf", "chatpdf-history-list");
+
+  const uploadBtn = document.getElementById("pdf-upload-btn");
+  const fileInput = document.getElementById("pdf-upload-input");
+  const renderArea = document.getElementById("pdf-render-area");
+
+  if (uploadBtn && fileInput) {
+    uploadBtn.onclick = () => fileInput.click();
+    fileInput.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file || file.type !== "application/pdf") return;
+
+      renderArea.innerHTML = '<div style="text-align:center; margin-top:50px; color:var(--text-muted);"><i class="ri-loader-4-line ri-spin"></i> Extracting text via PDF.js...</div>';
+
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+        let text = "";
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          text += content.items.map((item) => item.str).join(" ") + "\n";
+        }
+
+        currentPdfTextContext = "The user uploaded a document with the following text:\n\n" + text.substring(0, 15000);
+
+        const fileUrl = URL.createObjectURL(file);
+        renderArea.innerHTML = `
+          <object data="${fileUrl}#toolbar=0" type="application/pdf" width="100%" height="100%" style="border-radius:0 0 8px 8px;">
+            <p style="padding:20px;">PDF preview unavailable. <a href="${fileUrl}" target="_blank">Open PDF</a>.</p>
+          </object>
+        `;
+
+        await uploadToCloudStorage(auth.currentUser.uid, file);
+      } catch (err) {
+        console.error("PDF parse error", err);
+        renderArea.innerHTML = '<div style="text-align:center; padding:20px; color:red;">Failed to parse PDF.</div>';
+      }
+    };
+  }
+
+  const sendBtn = document.getElementById("pdf-chat-send-btn");
+  const input = document.getElementById("pdf-chat-input");
+  const msgContainer = document.getElementById("pdf-chat-messages");
+
+  if (sendBtn && input && msgContainer) {
+    const handleSend = async () => {
+      const userText = input.value.trim();
+      if (!userText) return;
+      if (!currentPdfTextContext) {
+        msgContainer.innerHTML += '<div class="message ai-msg">Please upload a PDF first.</div>';
+        return;
+      }
+
+      msgContainer.innerHTML += `<div class="message user-msg">${escapeHtml(userText)}</div>`;
+      input.value = "";
+      msgContainer.scrollTop = msgContainer.scrollHeight;
+
+      const typingId = "typing-" + Date.now();
+      msgContainer.innerHTML += `<div class="message ai-msg" id="${typingId}"><i class="ri-loader-4-line ri-spin"></i> Reviewing document...</div>`;
+
+      try {
+        const response = await callApi("/api/pdf/ask", { question: userText, context: currentPdfTextContext });
+        document.getElementById(typingId)?.remove();
+        msgContainer.innerHTML += `<div class="message ai-msg">${formatAIText(response)}</div>`;
+        msgContainer.scrollTop = msgContainer.scrollHeight;
+        await saveToolHistory(auth.currentUser.uid, "chatpdf", "PDF Q&A", `User: ${userText}\n\nAI: ${response}`);
+        loadToolHistoryInUI("chatpdf", "chatpdf-history-list");
+      } catch (err) {
+        document.getElementById(typingId)?.remove();
+        msgContainer.innerHTML += `<div class="message ai-msg" style="color:red;">Error: ${err.message}</div>`;
+      }
     };
 
-    window.closeHistoryViewer = function() {
-        const mainArea = document.querySelector('.main-tool-area');
-        if(!mainArea) return;
-        
-        const viewer = mainArea.querySelector('.history-viewer-overlay');
-        if(viewer) viewer.remove();
-        
-        Array.from(mainArea.children).forEach(child => {
-            if(child.classList.contains('hidden-by-viewer')) {
-                const orig = child.getAttribute('data-original-display');
-                child.style.display = orig || '';
-                child.classList.remove('hidden-by-viewer');
-            }
+    sendBtn.onclick = handleSend;
+    input.onkeypress = (e) => {
+      if (e.key === "Enter") handleSend();
+    };
+  }
+}
+
+function setupParuInteractions() {
+  const input = document.getElementById("paru-chat-input");
+  const sendBtn = document.getElementById("paru-send-btn");
+  const msgContainer = document.getElementById("paru-chat-messages");
+  const sidebar = document.getElementById("paru-history-list");
+  
+  if (!input || !sendBtn) return;
+
+  if (auth.currentUser) {
+    loadParuHistory(auth.currentUser.uid, msgContainer, sidebar);
+  }
+
+  const handleSend = async () => {
+    const userText = input.value.trim();
+    if (!userText) return;
+
+    msgContainer.innerHTML += `<div class="message user-msg">${escapeHtml(userText)}</div>`;
+    input.value = "";
+    msgContainer.scrollTop = msgContainer.scrollHeight;
+
+    if (auth.currentUser) await saveParuMessage(auth.currentUser.uid, "user", userText);
+
+    const typingId = "typing-" + Date.now();
+    msgContainer.innerHTML += `<div class="message ai-msg" id="${typingId}"><i class="ri-loader-4-line ri-spin"></i> Paru is thinking...</div>`;
+
+    try {
+      // Build conversation history format for Paru
+      const recentHistory = [];
+      const msgElements = msgContainer.querySelectorAll(".message");
+      // Pick last 6 messages
+      const sliceStart = Math.max(0, msgElements.length - 7); // exclude the newly added typing message
+      const sliceEnd = msgElements.length - 1;
+      for (let i = sliceStart; i < sliceEnd; i++) {
+        const el = msgElements[i];
+        recentHistory.push({
+          role: el.classList.contains("user-msg") ? "user" : "model",
+          text: el.innerText
         });
+      }
+
+      const response = await callApi("/api/paru/chat", { message: userText, history: recentHistory });
+      
+      document.getElementById(typingId)?.remove();
+      msgContainer.innerHTML += `<div class="message ai-msg">${formatAIText(response)}</div>`;
+      msgContainer.scrollTop = msgContainer.scrollHeight;
+
+      if (auth.currentUser) {
+        await saveParuMessage(auth.currentUser.uid, "ai", response);
+        loadParuHistory(auth.currentUser.uid, msgContainer, sidebar);
+      }
+    } catch (err) {
+      document.getElementById(typingId)?.remove();
+      msgContainer.innerHTML += `<div class="message ai-msg" style="color:red;">Error: ${err.message}</div>`;
+    }
+  };
+
+  sendBtn.onclick = handleSend;
+  input.onkeypress = (e) => {
+    if (e.key === "Enter") handleSend();
+  };
+
+  const newChatBtn = document.getElementById("new-paru-chat");
+  if (newChatBtn) {
+    newChatBtn.onclick = () => {
+      msgContainer.innerHTML = '<div class="message ai-msg">New Paaru conversation started. How can I assist you with your research today?</div>';
+      toast("Conversation cleared locally.");
     };
+  }
+}
 
-    async function saveToolHistory(toolName, title, content) {
-        if(!auth.currentUser) return;
-        try {
-            await addDoc(collection(db, "toolHistory", auth.currentUser.uid, toolName), {
-                title: title,
-                content: content,
-                timestamp: serverTimestamp()
-            });
-            loadToolHistory(toolName, `${toolName}-history-list`);
-        } catch(err) {
-            console.error("Error saving tool history", err);
-        }
-    }
+/* ═══════════════════════════════════════════════════════
+   SUPERVISOR INTERACTIONS
+   ═══════════════════════════════════════════════════════ */
 
-    async function deleteToolHistory(toolName, docId) {
-        if(!auth.currentUser) return;
-        try {
-            await deleteDoc(doc(db, "toolHistory", auth.currentUser.uid, toolName, docId));
-            loadToolHistory(toolName, `${toolName}-history-list`);
-        } catch(err) {
-            console.error("Error deleting history", err);
-        }
-    }
+function setupSupervisorDashboardInteractions() {
+  loadSupervisorDashboardStats();
+}
 
-    async function loadToolHistory(toolName, containerId) {
-        const container = document.getElementById(containerId);
-        if(!container) return;
-        
-        if(!auth.currentUser) {
-            container.innerHTML = '<div style="text-align:center; padding: 20px 0; color:var(--text-muted); font-size:0.8rem;">Please sign in to view history.</div>';
-            return;
-        }
-        
-        try {
-            const q = query(collection(db, "toolHistory", auth.currentUser.uid, toolName), orderBy("timestamp", "desc"));
-            const snapshot = await getDocs(q);
-            
-            if(snapshot.empty) {
-                container.innerHTML = '<div style="text-align:center; padding: 20px 0; color:var(--text-muted); font-size:0.8rem;">No saved history.</div>';
-                return;
-            }
+async function loadSupervisorDashboardStats() {
+  const uid = auth.currentUser.uid;
 
-            let htmlSidebar = '';
-            snapshot.forEach(docSnap => {
-                const data = docSnap.data();
-                const docId = docSnap.id;
-                const safeContent = encodeURIComponent(data.content);
-                htmlSidebar += `
-                <div class="history-item" data-id="${docId}">
-                    <div class="history-title" title="${data.title}">${data.title}</div>
-                    <div class="history-actions">
-                        <i class="ri-file-copy-line history-copy-btn" data-content="${safeContent}" title="Copy"></i>
-                        <i class="ri-download-line history-download-btn" data-title="${data.title}" data-content="${safeContent}" title="Download"></i>
-                        <i class="ri-delete-bin-line text-red history-delete-btn" data-tool="${toolName}" data-id="${docId}" title="Delete"></i>
-                    </div>
-                </div>`;
-            });
-            
-            container.innerHTML = htmlSidebar;
-            
-            container.querySelectorAll('.history-copy-btn').forEach(btn => {
-                btn.onclick = (e) => {
-                    e.stopPropagation();
-                    const text = decodeURIComponent(e.target.getAttribute('data-content'));
-                    navigator.clipboard.writeText(text);
-                    e.target.className = 'ri-check-line history-copy-btn';
-                    setTimeout(() => e.target.className = 'ri-file-copy-line history-copy-btn', 2000);
-                };
-            });
-            
-            container.querySelectorAll('.history-download-btn').forEach(btn => {
-                btn.onclick = (e) => {
-                    e.stopPropagation();
-                    const text = decodeURIComponent(e.target.getAttribute('data-content'));
-                    const titleStr = e.target.getAttribute('data-title').replace(/[^a-z0-9]/gi, '_').toLowerCase();
-                    const blob = new Blob([text], { type: 'text/plain' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `${titleStr}.txt`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                };
-            });
-            
-            container.querySelectorAll('.history-delete-btn').forEach(btn => {
-                btn.onclick = (e) => {
-                    e.stopPropagation();
-                    if(confirm("Delete this saved item?")) {
-                        const tool = e.target.getAttribute('data-tool');
-                        const id = e.target.getAttribute('data-id');
-                        deleteToolHistory(tool, id);
-                    }
-                };
-            });
-            
-            container.querySelectorAll('.history-item').forEach(item => {
-                item.onclick = (e) => {
-                    if(e.target.tagName === 'I') return; 
-                    const title = item.querySelector('.history-title').innerText;
-                    const contentBtn = item.querySelector('.history-copy-btn');
-                    if(contentBtn) {
-                        const text = decodeURIComponent(contentBtn.getAttribute('data-content'));
-                        openHistoryViewer(title, text);
-                    }
-                };
-            });
-            
-        } catch(err) {
-            console.error("Error loading tool history", err);
-            container.innerHTML = '<div style="text-align:center; padding: 20px 0; color:var(--text-muted); font-size:0.8rem;">Failed to load.</div>';
-        }
-    }
+  const scholars = await fetchScholarsForSupervisor(uid);
+  const scholarsEl = document.getElementById("sup-stats-scholars");
+  if (scholarsEl) scholarsEl.innerText = scholars.length;
 
-    function setupParuInteractions() {
-        const input = document.getElementById('paru-chat-input');
-        const sendBtn = document.getElementById('paru-send-btn');
-        const msgContainer = document.getElementById('paru-chat-messages');
-        if(!input || !sendBtn) return;
-        
-        const currentUser = auth.currentUser;
-        if(currentUser) {
-            loadParuHistory(currentUser.uid);
-        } else {
-            document.getElementById('paru-history-list').innerHTML = '<div style="text-align:center; padding: 20px 0; color:var(--text-muted); font-size:0.8rem;">Please log in.</div>';
-        }
-        
-        const handleSend = async () => {
-            if(input.value.trim() !== '') {
-                const userText = input.value;
-                msgContainer.innerHTML += '<div class="message user-msg">' + userText + '</div>';
-                input.value = '';
-                msgContainer.scrollTop = msgContainer.scrollHeight;
-                
-                if(currentUser) saveParuMessage(currentUser.uid, 'user', userText);
-                
-                const typingId = "typing-" + Date.now();
-                msgContainer.innerHTML += '<div class="message ai-msg" id="' + typingId + '">Paru is thinking...</div>';
-                msgContainer.scrollTop = msgContainer.scrollHeight;
-                
-                const aiResponse = await fetchParuResponse(userText);
-                
-                if(currentUser) saveParuMessage(currentUser.uid, 'ai', aiResponse);
-                
-                const typingEl = document.getElementById(typingId);
-                if(typingEl) typingEl.remove();
-                
-                const formattedResponse = aiResponse.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\n/g, '<br>');
-                msgContainer.innerHTML += '<div class="message ai-msg">' + formattedResponse + '</div>';
-                msgContainer.scrollTop = msgContainer.scrollHeight;
-                
-                // Refresh history sidebar logic could be called here to add new dates incrementally
-            }
+  const submissions = await fetchSubmissionsForSupervisor(uid);
+  const pendingSubs = submissions.filter(s => s.status === "pending_review");
+  const subsEl = document.getElementById("sup-stats-submissions");
+  if (subsEl) subsEl.innerText = pendingSubs.length;
+
+  const meetings = await fetchMeetingsForSupervisor(uid);
+  const pendingMeetings = meetings.filter(m => m.status === "pending");
+  const meetingsEl = document.getElementById("sup-stats-meetings");
+  if (meetingsEl) meetingsEl.innerText = pendingMeetings.length;
+
+  // Render assigned scholars list
+  const scholarsListContainer = document.getElementById("sup-scholars-list");
+  if (scholarsListContainer) {
+    if (scholars.length === 0) {
+      scholarsListContainer.innerHTML = `<p style="color:var(--text-muted); font-size:0.9rem; text-align:center; margin:auto;">No scholars assigned to you.</p>`;
+    } else {
+      scholarsListContainer.innerHTML = scholars.map(s => `
+        <div class="student-card" style="padding:15px; margin-bottom:8px;">
+          <h4 style="margin:0;">${escapeHtml(s.displayName)}</h4>
+          <p style="font-size:0.8rem; color:var(--text-muted); margin-top:2px;">${escapeHtml(s.email)} | Department: ${escapeHtml(s.department || "N/A")}</p>
+          <button class="btn-text view-scholar-milestones-btn" data-scholar-uid="${s.uid}" style="font-size:0.8rem; padding:6px 0; margin-top:6px; background:none;">Manage Milestones →</button>
+        </div>
+      `).join("");
+
+      // Bind click handlers
+      scholarsListContainer.querySelectorAll(".view-scholar-milestones-btn").forEach(btn => {
+        btn.onclick = () => {
+          const scholarUid = btn.getAttribute("data-scholar-uid");
+          loadView(`scholars&scholar=${scholarUid}`);
         };
-        
-        sendBtn.addEventListener('click', handleSend);
-        input.addEventListener('keypress', (e) => { if(e.key === 'Enter') handleSend(); });
+      });
     }
+  }
 
-    async function fetchParuResponse(prompt) {
-        try {
-            const genAI = new GoogleGenerativeAI("AIzaSyBYNhCMj8o0me2Wh9p-Mfz006LbLAvLpxY");
-            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
-            const result = await model.generateContent("You are Paru, an advanced AI chatbot and a supportive friend to the research scholar. You possess the wisdom of a creator, author, researcher, and helper, but you must blend these seamlessly into a natural, conversational, and empathetic tone. Never use obvious headers for your roles. IMPORTANT: Speak in simple, plain English. Match the length of your response to the user's input—if the user shares a short feeling or simple line, respond concisely and empathetically like a caring friend. Avoid long essays unless explicitly asked to write one. The user says: " + prompt);
-            return result.response.text();
-        } catch(err) {
-            console.error(err);
-            return "Connection Error: Please ensure you are running via VS Code Live Server. " + err.message;
-        }
-    }
-
-    // --- Serverless Backend Integration ---
-
-    async function uploadToCloudStorage(file) {
-        if(!auth.currentUser) { alert("Please login first."); return null; }
-        try {
-            const storageRef = ref(storage, `users/${auth.currentUser.uid}/uploads/${file.name}`);
-            await uploadBytes(storageRef, file);
-            alert(`Successfully uploaded ${file.name} to Cloud Storage!`);
-            return await getDownloadURL(storageRef);
-        } catch(err) {
-            console.error("Upload error:", err);
-            alert("Failed to upload file.");
-            return null;
-        }
-    }
-
-    function setupDashboardInteractions() {
-        const uploadBtn = document.getElementById('dash-upload-btn');
-        const fileInput = document.getElementById('dash-file-input');
-        if(uploadBtn && fileInput) {
-            uploadBtn.onclick = () => fileInput.click();
-            fileInput.onchange = async (e) => {
-                const file = e.target.files[0];
-                if(file) {
-                    const originalText = uploadBtn.innerHTML;
-                    uploadBtn.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> Uploading...';
-                    await uploadToCloudStorage(file);
-                    uploadBtn.innerHTML = originalText;
-                }
-            };
-        }
-    }
-
-    async function saveCloudDocument(docId, textContent) {
-        if(!auth.currentUser) { alert("Please login to save to cloud."); return; }
-        try {
-            await setDoc(doc(db, "userDocuments", auth.currentUser.uid, "documents", docId), {
-                content: textContent,
-                lastSaved: serverTimestamp()
-            });
-            alert(`Draft securely saved to Cloud Database!`);
-        } catch(err) {
-            console.error("Save error:", err);
-            alert("Failed to save document.");
-        }
-    }
-
-    async function loadCloudDocument(docId, textAreaEl) {
-        if(!auth.currentUser) return;
-        try {
-            const docSnap = await getDoc(doc(db, "userDocuments", auth.currentUser.uid, "documents", docId));
-            if (docSnap.exists() && textAreaEl) {
-                textAreaEl.value = docSnap.data().content || "";
-            }
-        } catch(err) {
-            console.error("Load error:", err);
-        }
-    }
-
-    function setupNotesInteractions() {
-        loadToolHistory('notes', 'notes-history-list');
-        // Currently Notes is just a visual text area demo without an explicit "Save" button in the toolbar,
-        // but we ensure the history sidebar loads correctly for visual consistency.
-    }
-
-    function setupLatexInteractions() {
-        loadToolHistory('latex', 'latex-history-list');
-    }
-
-    function setupEditingInteractions() {
-        // Load history for the editing sub-tools
-        loadToolHistory('editing', 'editing-history-list');
-        
-        // Set up the hub card handlers if this is the main editing hub
-        const content = document.getElementById('dashboard-content');
-        
-        const e1 = document.getElementById('hub-edit-grammar');
-        if(e1) {
-            e1.removeEventListener('click', e1._grammarHandler);
-            e1._grammarHandler = () => { 
-                content.innerHTML = getGrammarHTML(); 
-                setupGrammarInteractions(); 
-            };
-            e1.addEventListener('click', e1._grammarHandler);
-        }
-        
-        const e2 = document.getElementById('hub-edit-plag-scan');
-        if(e2) {
-            e2.removeEventListener('click', e2._plagScanHandler);
-            e2._plagScanHandler = () => { 
-                content.innerHTML = getPlagScanHTML(); 
-                setupPlagScanInteractions(); 
-            };
-            e2.addEventListener('click', e2._plagScanHandler);
-        }
-        
-        const e3 = document.getElementById('hub-edit-plag-rem');
-        if(e3) {
-            e3.removeEventListener('click', e3._plagRemHandler);
-            e3._plagRemHandler = () => { 
-                content.innerHTML = getPlagRemHTML(); 
-                setupPlagRemInteractions(); 
-            };
-            e3.addEventListener('click', e3._plagRemHandler);
-        }
-        
-        const e4 = document.getElementById('hub-edit-para');
-        if(e4) {
-            e4.removeEventListener('click', e4._paraHandler);
-            e4._paraHandler = () => { 
-                content.innerHTML = getParaphraseHTML(); 
-                setupParaphraseInteractions(); 
-            };
-            e4.addEventListener('click', e4._paraHandler);
-        }
-        
-        const e5 = document.getElementById('hub-edit-ai-chk');
-        if(e5) {
-            e5.removeEventListener('click', e5._aiChkHandler);
-            e5._aiChkHandler = () => { 
-                content.innerHTML = getAiCheckHTML(); 
-                setupAiCheckInteractions(); 
-            };
-            e5.addEventListener('click', e5._aiChkHandler);
-        }
-        
-        const e6 = document.getElementById('hub-edit-reduce');
-        if(e6) {
-            e6.removeEventListener('click', e6._reduceHandler);
-            e6._reduceHandler = () => { 
-                content.innerHTML = getAiReduceHTML(); 
-                setupAiReduceInteractions(); 
-            };
-            e6.addEventListener('click', e6._reduceHandler);
-        }
-    }
-
-    function setupDraftInteractions() {
-        loadToolHistory('draft', 'draft-history-list');
-        
-        const saveBtn = document.getElementById('draft-save-btn');
-        const textarea = document.getElementById('draft-textarea');
-        if(textarea) loadCloudDocument('thesisDraft', textarea);
-        
-        if(saveBtn && textarea) {
-            saveBtn.onclick = async () => {
-                const originalText = saveBtn.innerHTML;
-                saveBtn.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> Saving...';
-                await saveCloudDocument('thesisDraft', textarea.value);
-                await saveToolHistory('draft', 'Draft Version ' + new Date().toLocaleTimeString(), textarea.value);
-                saveBtn.innerHTML = originalText;
-            };
-        }
-    }
-
-    function setupNotesInteractions() {
-        loadToolHistory('notes', 'notes-history-list');
-        // Notes interaction logic can be added here for saving, exporting, etc.
-    }
-
-    function setupLatexInteractions() {
-        loadToolHistory('latex', 'latex-history-list');
-        // LaTeX conversion interaction logic can be added here
-    }
-
-    let currentPdfTextContext = "";
-
-    function setupChatPdfInteractions() {
-        loadToolHistory('chatpdf', 'chatpdf-history-list');
-
-        const uploadBtn = document.getElementById('pdf-upload-btn');
-        const fileInput = document.getElementById('pdf-upload-input');
-        const renderArea = document.getElementById('pdf-render-area');
-        
-        if(uploadBtn && fileInput) {
-            uploadBtn.onclick = () => fileInput.click();
-            fileInput.onchange = async (e) => {
-                const file = e.target.files[0];
-                if(file && file.type === "application/pdf") {
-                    renderArea.innerHTML = '<div style="text-align:center; margin-top: 50px; color: var(--text-muted);"><i class="ri-loader-4-line ri-spin"></i> Extracting text via PDF.js...</div>';
-                    
-                    try {
-                        const arrayBuffer = await file.arrayBuffer();
-                        const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
-                        let text = "";
-                        for (let i = 1; i <= pdf.numPages; i++) {
-                            const page = await pdf.getPage(i);
-                            const content = await page.getTextContent();
-                            text += content.items.map(item => item.str).join(" ") + "\\n";
-                        }
-                        
-                        currentPdfTextContext = "The user has uploaded a document with the following text:\\n\\n" + text.substring(0, 15000) + "\\n\\n---\\n\\n"; 
-                        
-                        const fileUrl = URL.createObjectURL(file);
-                        renderArea.innerHTML = `<object data="${fileUrl}#toolbar=0" type="application/pdf" width="100%" height="100%" style="border-radius:0 0 8px 8px;">
-                            <p style="padding:20px;">Your browser does not support PDFs. <a href="${fileUrl}" style="color:var(--text-blue);">Download the PDF</a>.</p>
-                        </object>`;
-                        
-                        await uploadToCloudStorage(file);
-                        
-                    } catch(err) {
-                        console.error('PDF JS err', err);
-                        renderArea.innerHTML = '<div style="text-align:center; padding: 20px; color: red;">Failed to parse PDF</div>';
-                    }
-                }
-            };
-        }
-        
-        const chatPdfView = document.querySelector('.split-view .chat-input-area');
-        if(chatPdfView) {
-            const input = chatPdfView.querySelector('input');
-            const btn = chatPdfView.querySelector('.send-btn');
-            const msgContainer = document.querySelector('.split-view .chat-messages');
-            
-            const newBtn = btn.cloneNode(true);
-            btn.parentNode.replaceChild(newBtn, btn);
-            const newInput = input.cloneNode(true);
-            input.parentNode.replaceChild(newInput, input);
-            
-            const handleSend = async () => {
-                if(newInput.value.trim() !== '') {
-                    const userText = newInput.value;
-                    msgContainer.innerHTML += '<div class="message user-msg">' + userText + '</div>';
-                    newInput.value = '';
-                    msgContainer.scrollTop = msgContainer.scrollHeight;
-                    
-                    const typingId = "typing-" + Date.now();
-                    msgContainer.innerHTML += '<div class="message ai-msg" id="' + typingId + '">Reviewing document...</div>';
-                    msgContainer.scrollTop = msgContainer.scrollHeight;
-                    
-                    const aiResponse = await fetchGeminiResponse(currentPdfTextContext + userText);
-                    
-                    const typingEl = document.getElementById(typingId);
-                    if(typingEl) typingEl.remove();
-                    
-                    const formattedResponse = aiResponse.replace(/\\*\\*(.*?)\\*\\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                    msgContainer.innerHTML += '<div class="message ai-msg">' + formattedResponse + '</div>';
-                    msgContainer.scrollTop = msgContainer.scrollHeight;
-                    
-                    // Save to history automatically
-                    await saveToolHistory('chatpdf', 'PDF Q&A Session', "User: " + userText + "\\n\\nAI: " + aiResponse);
-                }
-            };
-            
-            newBtn.addEventListener('click', handleSend);
-            newInput.addEventListener('keypress', (e) => { if(e.key === 'Enter') handleSend(); });
-        }
-    }
-
-    async function extractTextFromMultiplePDFs(files) {
-        let fullText = "";
-        for(let i=0; i<files.length; i++) {
-            try {
-                const arrayBuffer = await files[i].arrayBuffer();
-                const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
-                fullText += `--- Document ${i+1}: ${files[i].name} ---\\n`;
-                for (let j = 1; j <= pdf.numPages; j++) {
-                    const page = await pdf.getPage(j);
-                    const content = await page.getTextContent();
-                    fullText += content.items.map(item => item.str).join(" ") + "\\n";
-                }
-            } catch(e) { console.error("Extract err", e); }
-        }
-        return fullText;
-    }
-
-    function attachLitBackBtn() {
-        const btn = document.getElementById('lit-back-btn');
-        if(btn) {
-            btn.onclick = () => {
-                document.getElementById('dashboard-content').innerHTML = getLiteratureHTML();
-                setupLiteratureInteractions();
-            };
-        }
-    }
-
-    function subToolLoading(toolId, msg) {
-        const outArea = document.getElementById(toolId + '-output-area');
-        const outContent = document.getElementById(toolId + '-output-content');
-        if(!outArea || !outContent) return null;
-        outArea.style.display = 'block';
-        outContent.innerHTML = `<i class="ri-loader-4-line ri-spin"></i> ${msg}...`;
-        outArea.scrollIntoView({behavior: 'smooth'});
-        return outContent;
-    }
-
-    // --- Sub-Tools Logic for Literature ---
-    function setupLitReviewInteractions() {
-        loadToolHistory('lit-review', 'lit-review-history-list');
-        attachLitBackBtn();
-        const reviewFile = document.getElementById('lit-review-file');
-        if(reviewFile) {
-            reviewFile.onchange = async (e) => {
-                if(e.target.files.length > 0) {
-                    const outContent = subToolLoading('lit-review', "Extracting papers and writing Literature Review");
-                    if(!outContent) return;
-                    const text = await extractTextFromMultiplePDFs(e.target.files);
-                    const prompt = "Synthesize a comprehensive literature review from these papers. Highlight the common themes, differences, and chronological progression if any. Text:\\n" + text.substring(0, 15000);
-                    const response = await fetchProfessionalResponse(prompt);
-                    outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                    await saveToolHistory('lit-review', 'Literature Review', response);
-                }
-            };
-        }
-    }
-
-    function setupResearchGapInteractions() {
-        loadToolHistory('lit-gap', 'lit-gap-history-list');
-        attachLitBackBtn();
-        const gapFile = document.getElementById('lit-gap-file');
-        if(gapFile) {
-            gapFile.onchange = async (e) => {
-                if(e.target.files.length > 0) {
-                    if(e.target.files.length > 10) {
-                        alert("Please upload a maximum of 10 papers.");
-                        document.getElementById('lit-gap-file').value = "";
-                        return;
-                    }
-                    const outContent = subToolLoading('lit-gap', "Extracting papers and finding Research Gaps");
-                    if(!outContent) return;
-                    const text = await extractTextFromMultiplePDFs(e.target.files);
-                    const prompt = "Analyze these papers and highlight the unexplored methodologies or research gaps. Provide a bulleted list of potential future research directions. Text:\\n" + text.substring(0, 15000);
-                    const response = await fetchProfessionalResponse(prompt);
-                    outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                    await saveToolHistory('lit-gap', 'Research Gap Analysis', response);
-                }
-            };
-        }
-    }
-
-    function setupProblemStmtInteractions() {
-        loadToolHistory('lit-problem', 'lit-problem-history-list');
-        attachLitBackBtn();
-        const probFile = document.getElementById('lit-problem-file');
-        if(probFile) {
-            probFile.onchange = async (e) => {
-                const file = e.target.files[0];
-                if(file) {
-                    const outContent = subToolLoading('lit-problem', "Extracting Word document and Formulating Problem Statements");
-                    if(!outContent) return;
-                    try {
-                        const arrayBuffer = await file.arrayBuffer();
-                        const result = await mammoth.extractRawText({arrayBuffer: arrayBuffer});
-                        const text = result.value;
-                        const prompt = "Based on this research draft or ideas, draft three compelling and distinct problem statements: " + text.substring(0, 15000);
-                        const response = await fetchProfessionalResponse(prompt);
-                        outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                        await saveToolHistory('lit-problem', 'Problem Statements', response);
-                    } catch(err) {
-                        console.error(err);
-                        outContent.innerHTML = '<span class="text-red">Error parsing Word document. Please ensure it is a valid .docx file.</span>';
-                    }
-                }
-            };
-        }
-    }
-
-    function setupJournalFinderInteractions() {
-        loadToolHistory('lit-publish', 'lit-publish-history-list');
-        attachLitBackBtn();
-        const publishBtn = document.getElementById('lit-publish-btn');
-        const publishText = document.getElementById('lit-publish-text');
-        if(publishBtn && publishText) {
-            publishBtn.onclick = async () => {
-                const abstract = publishText.value.trim();
-                if(abstract) {
-                    const outContent = subToolLoading('lit-publish', "Finding Target Journals");
-                    if(!outContent) return;
-                    const p = "Suggest 5 high-impact, relevant academic journals or conferences for a paper with the following abstract. Provide the rationale for each. Abstract: " + abstract;
-                    const response = await fetchProfessionalResponse(p);
-                    outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                    await saveToolHistory('lit-publish', 'Journal Suggestions', response);
-                }
-            };
-        }
-    }
-
-    // --- Sub-Tools Logic for Editing ---
-    function attachEditBackBtn() {
-        const btn = document.getElementById('edit-back-btn');
-        if(btn) {
-            btn.onclick = () => {
-                document.getElementById('dashboard-content').innerHTML = getEditingHTML();
-                setupEditingInteractions();
-            };
-        }
-    }
-
-    function setupGrammarInteractions() {
-        loadToolHistory('edit-grammar', 'edit-grammar-history-list'); attachEditBackBtn();
-        const btn = document.getElementById('edit-grammar-btn');
-        if(btn) {
-            btn.onclick = async () => {
-                const text = document.getElementById('edit-grammar-text').value;
-                if(!text) return;
-                const outContent = subToolLoading('edit-grammar', 'Checking grammar');
-                const response = await fetchProfessionalResponse("Fix grammatical errors and enhance clarity of the following text:\\n\\n" + text);
-                outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                await saveToolHistory('edit-grammar', 'Grammar Check', response);
-            };
-        }
-    }
-    
-    function setupPlagScanInteractions() {
-        loadToolHistory('edit-plag-scan', 'edit-plag-scan-history-list'); attachEditBackBtn();
-        const btn = document.getElementById('edit-plag-scan-btn');
-        if(btn) {
-            btn.onclick = async () => {
-                const text = document.getElementById('edit-plag-scan-text').value;
-                if(!text) return;
-                const outContent = subToolLoading('edit-plag-scan', 'Scanning for unoriginality');
-                const response = await fetchProfessionalResponse("Analyze this text for unoriginal content patterns and identify potential plagiarism risks:\\n\\n" + text);
-                outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                await saveToolHistory('edit-plag-scan', 'Plagiarism Scan', response);
-            };
-        }
-    }
-    
-    function setupPlagRemInteractions() {
-        loadToolHistory('edit-plag-rem', 'edit-plag-rem-history-list'); attachEditBackBtn();
-        const btn = document.getElementById('edit-plag-rem-btn');
-        if(btn) {
-            btn.onclick = async () => {
-                const text = document.getElementById('edit-plag-rem-text').value;
-                if(!text) return;
-                const outContent = subToolLoading('edit-plag-rem', 'Rewriting text');
-                const response = await fetchProfessionalResponse("Rewrite the following text to ensure originality while retaining its meaning. It has been flagged as plagiarized:\\n\\n" + text);
-                outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                await saveToolHistory('edit-plag-rem', 'Plagiarism Removal', response);
-            };
-        }
-    }
-    
-    function setupParaphraseInteractions() {
-        loadToolHistory('edit-para', 'edit-para-history-list'); attachEditBackBtn();
-        const btn = document.getElementById('edit-para-btn');
-        if(btn) {
-            btn.onclick = async () => {
-                const text = document.getElementById('edit-para-text').value;
-                if(!text) return;
-                const outContent = subToolLoading('edit-para', 'Paraphrasing text');
-                const response = await fetchProfessionalResponse("Paraphrase the following section to enhance flow and academic vocabulary:\\n\\n" + text);
-                outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                await saveToolHistory('edit-para', 'Paraphrase', response);
-            };
-        }
-    }
-    
-    function setupAiCheckInteractions() {
-        loadToolHistory('edit-ai-chk', 'edit-ai-chk-history-list'); attachEditBackBtn();
-        const btn = document.getElementById('edit-ai-chk-btn');
-        if(btn) {
-            btn.onclick = async () => {
-                const text = document.getElementById('edit-ai-chk-text').value;
-                if(!text) return;
-                const outContent = subToolLoading('edit-ai-chk', 'Analyzing AI likelihood');
-                const response = await fetchProfessionalResponse("Check if this text is likely AI-generated. Provide a percentage confidence score and point out robotic phrasing:\\n\\n" + text);
-                outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                await saveToolHistory('edit-ai-chk', 'AI Detection', response);
-            };
-        }
-    }
-    
-    function setupAiReduceInteractions() {
-        loadToolHistory('edit-reduce', 'edit-reduce-history-list'); attachEditBackBtn();
-        const btn = document.getElementById('edit-reduce-btn');
-        if(btn) {
-            btn.onclick = async () => {
-                const text = document.getElementById('edit-reduce-text').value;
-                if(!text) return;
-                const outContent = subToolLoading('edit-reduce', 'Summarizing condensing text');
-                const response = await fetchProfessionalResponse("Summarize and condense the following lengthy text into a tight, impactful paragraph:\\n\\n" + text);
-                outContent.innerHTML = response.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
-                await saveToolHistory('edit-reduce', 'Summary', response);
-            };
-        }
-    }
-
-    // --- Hub Routing Implementations ---
-    function setupLiteratureInteractions() {
-        const content = document.getElementById('dashboard-content');
-        
-        const c1 = document.getElementById('hub-card-review');
-        if(c1) {
-            c1.removeEventListener('click', c1._reviewHandler);
-            c1._reviewHandler = () => {
-                content.innerHTML = getLitReviewHTML();
-                setupLitReviewInteractions();
-            };
-            c1.addEventListener('click', c1._reviewHandler);
-        }
-        
-        const c2 = document.getElementById('hub-card-gap');
-        if(c2) {
-            c2.removeEventListener('click', c2._gapHandler);
-            c2._gapHandler = () => { 
-                content.innerHTML = getResearchGapHTML(); 
-                setupResearchGapInteractions(); 
-            };
-            c2.addEventListener('click', c2._gapHandler);
-        }
-        
-        const c3 = document.getElementById('hub-card-problem');
-        if(c3) {
-            c3.removeEventListener('click', c3._problemHandler);
-            c3._problemHandler = () => { 
-                content.innerHTML = getProblemStmtHTML(); 
-                setupProblemStmtInteractions(); 
-            };
-            c3.addEventListener('click', c3._problemHandler);
-        }
-        
-        const c4 = document.getElementById('hub-card-publish');
-        if(c4) {
-            c4.removeEventListener('click', c4._publishHandler);
-            c4._publishHandler = () => { 
-                content.innerHTML = getJournalFinderHTML(); 
-                setupJournalFinderInteractions(); 
-            };
-            c4.addEventListener('click', c4._publishHandler);
-        }
-    }
-
-    function openLiteratureReviewTab(){
-        const popup = window.open('', '_blank');
-        if(!popup){alert('Popup blocked. Allow popups for this site.'); return;}
-
-        const html = `
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Literature Review Tool</title>
-                <style>
-                    body{margin:0;font-family:Inter,system-ui,Arial,sans-serif;background:#f0f4f8;color:#111827;}
-                    .layout{display:grid;grid-template-columns:1fr 2fr 2fr;height:100vh;gap:8px;padding:8px;background:#f0f4f8;}
-                    .panel{background:rgba(255,255,255,0.7);border:1px solid rgba(0,0,0,0.1);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.05);}
-                    .panel header{padding:12px 14px;font-weight:700;background:rgba(0,0,0,0.05);color:#111827;}
-                    .panel main{padding:10px;flex:1;overflow:auto;}
-                    .panel .padded{padding:10px;}
-                    .control-group{margin-bottom:10px;}
-                    .control-group label{display:block;font-size:13px;color:#4b5563;margin-bottom:4px;}
-                    .control-group input[type=file], .control-group button, .control-group textarea{width:100%;}
-                    .control-group textarea{height:120px;resize:vertical;padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,0.1);background:rgba(255,255,255,0.8);color:#111827;}
-                    .btn{border:0;border-radius:8px;background:#52c41a;color:#fff;padding:10px 12px;font-weight:700;cursor:pointer;transition:transform 0.2s;}
-                    .btn:active{transform:translateY(1px);}
-                    .history-item{padding:10px;border-radius:8px;margin-bottom:8px;background:rgba(0,0,0,0.05);cursor:pointer;color:#111827;font-size:0.9rem;}
-                    .history-item:hover{background:rgba(0,0,0,0.1);}                     
-                    embed{width:100%;height:calc(100% - 42px);border:1px solid rgba(0,0,0,0.1);background:#fff;border-radius:8px;}
-                    .summary-content{white-space:pre-wrap;line-height:1.75;font-size:0.95rem;padding:16px;border-radius:10px;border:1px solid rgba(0,0,0,0.08);background:#ffffff;min-height:260px;}
-                    .summary-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;}
-                </style>
-            </head>
-            <body>
-                <div class="layout">
-                    <section class="panel" id="historyPanel">
-                        <header>History</header>
-                        <main>
-                            <div id="historyList"></div>
-                        </main>
-                    </section>
-                    <section class="panel" id="pdfPanel">
-                        <header>Upload & View PDF</header>
-                        <main>
-                            <div class="padded control-group">
-                                <label for="literatureFile">Select PDF</label>
-                                <input type="file" id="literatureFile" accept="application/pdf" />
-                                <button class="btn" id="loadPdfBtn" style="margin-top:10px;">Load PDF</button>
-                            </div>
-                            <embed id="pdfViewer" src="" type="application/pdf" style="display:block;" onload="console.log('PDF loaded successfully')" onerror="console.error('PDF failed to load')">
-                                <p style="padding: 20px; text-align: center; color: #666;">Your browser does not support PDF viewing. Please use a modern browser like Chrome, Firefox, or Edge.</p>
-                            </embed>
-                        </main>
-                    </section>
-                    <section class="panel" id="summaryPanel">
-                        <header>Summarized Paper (500 words max)</header>
-                        <main>
-                            <div class="padded summary-content" id="summaryContent">Upload a PDF and click "Summarize" to generate an aligned summary with headings and key refs.</div>
-                            <div class="summary-actions">
-                                <button class="btn" id="copySummaryBtn" style="background:#3b82f6;">Copy Text</button>
-                                <button class="btn" id="downloadSummaryBtn" style="background:#6366f1;">Download as .doc</button>
-                                <button class="btn" id="summarizeBtn" style="flex:1;">Generate 500-word Summary</button>
-                            </div>
-                        </main>
-                    </section>
-                </div>
-                <!-- Scripts loaded dynamically after document is ready -->
-            </body>
-            </html>
+  // Render pending meeting requests list
+  const meetingsListContainer = document.getElementById("sup-meetings-list");
+  if (meetingsListContainer) {
+    if (pendingMeetings.length === 0) {
+      meetingsListContainer.innerHTML = `<p style="color:var(--text-muted); font-size:0.9rem; text-align:center; margin:auto;">No pending meeting requests.</p>`;
+    } else {
+      meetingsListContainer.innerHTML = pendingMeetings.map(m => {
+        const scholarName = scholars.find(s => s.uid === m.scholarId)?.displayName || "Scholar";
+        return `
+          <div class="meeting-card" style="padding:15px; margin-bottom:8px;">
+            <h4 style="margin:0;">Meeting Request from ${escapeHtml(scholarName)}</h4>
+            <p style="font-size:0.85rem; margin-top:4px;"><strong>Date:</strong> ${escapeHtml(m.requestedDate)} | <strong>Time:</strong> ${escapeHtml(m.requestedTime)}</p>
+            <p style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;"><strong>Agenda:</strong> ${escapeHtml(m.agenda)}</p>
+            <div class="inline-actions" style="margin-top:10px;">
+              <button class="primary-btn approve-meeting-btn" data-id="${m.id}" style="padding:5px 12px; font-size:0.8rem;">Approve</button>
+              <button class="secondary-btn decline-meeting-btn" data-id="${m.id}" style="padding:5px 12px; font-size:0.8rem; border-color:red; color:red;">Decline</button>
+            </div>
+          </div>
         `;
-        popup.document.write(html);
-        popup.document.close();
-        
-        // Now dynamically load the scripts after the document is ready
-        setTimeout(() => {
-            // Initialize all functionality
-            const initScript = popup.document.createElement('script');
-            initScript.textContent = `
-                const historyKey = 'litReviewHistory';
-                const history = JSON.parse(localStorage.getItem(historyKey) || '[]');
-                const historyList = document.getElementById('historyList');
-                const pdfViewer = document.getElementById('pdfViewer');
-                const fileInput = document.getElementById('literatureFile');
-                const summaryContent = document.getElementById('summaryContent');
+      }).join("");
 
-                const renderHistory = () => {
-                    if(history.length === 0) {
-                        historyList.innerHTML = '<div style="padding:12px;color:#4b5563;">No history yet. Generate a summary to save it here.</div>';
-                        return;
-                    }
-                    historyList.innerHTML = history.map((item,index)=>'<div class="history-item" data-index="'+index+'">'+item.title+'</div>').join('');
-                    document.querySelectorAll('.history-item').forEach(el=> el.addEventListener('click',()=>{
-                        const item = history[el.dataset.index];
-                        summaryContent.textContent = item.data;
-                    }));
-                };
+      meetingsListContainer.querySelectorAll(".approve-meeting-btn").forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.getAttribute("data-id");
+          await respondToMeeting(id, "approved", "Approved by supervisor.");
+          toast("Meeting approved.");
+          loadSupervisorDashboardStats();
+        };
+      });
 
-                const saveHistory = () => {
-                    localStorage.setItem(historyKey, JSON.stringify(history));
-                };
+      meetingsListContainer.querySelectorAll(".decline-meeting-btn").forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.getAttribute("data-id");
+          await respondToMeeting(id, "declined", "Declined by supervisor.");
+          toast("Meeting declined.", "error");
+          loadSupervisorDashboardStats();
+        };
+      });
+    }
+  }
 
-                const updateHistory = (title, data) => {
-                    history.unshift({title, data});
-                    saveHistory();
-                    renderHistory();
-                };
-
-                renderHistory();
-                
-                const loadSelectedPdf = () => {
-                    const file = fileInput.files[0];
-                    console.log('Loading PDF file:', file);
-                    if(!file) {
-                        summaryContent.textContent = 'Select a PDF to preview it here.';
-                        pdfViewer.src = '';
-                        pdfViewer.style.display = 'none';
-                        return false;
-                    }
-                    const url = URL.createObjectURL(file);
-                    console.log('Created blob URL:', url);
-                    pdfViewer.src = url + '#toolbar=0&navpanes=0&scrollbar=0';
-                    pdfViewer.style.width = '100%';
-                    pdfViewer.style.height = '100%';
-                    pdfViewer.style.display = 'block';
-                    summaryContent.textContent = 'PDF loaded. Click "Generate 500-word Summary" to proceed.';
-                    console.log('PDF viewer updated');
-                    return true;
-                };
-                
-                fileInput.addEventListener('change', loadSelectedPdf);
-                document.getElementById('loadPdfBtn').addEventListener('click', () => {
-                    if(!loadSelectedPdf()) alert('Please select a PDF file.');
-                });
-                
-                document.getElementById('summarizeBtn').addEventListener('click',async()=>{
-                    const file = fileInput.files[0];
-                    if(!file) return alert('Please select and load a PDF first.');
-                    summaryContent.textContent = 'Extracting text and generating summary... Please wait.';
-                    console.log('Starting PDF summarization for file:', file.name);
-                    try {
-                        let pdfjsLib = window.pdfjsLib;
-                        if(!pdfjsLib) {
-                            summaryContent.textContent = 'Loading PDF.js library... Please wait.';
-                            for(let i = 0; i < 30; i++) {
-                                await new Promise(r => setTimeout(r, 100));
-                                pdfjsLib = window.pdfjsLib;
-                                if(pdfjsLib) break;
-                            }
-                        }
-                        if(!pdfjsLib) throw new Error('PDF.js failed to load. Please refresh and try again.');
-                        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-                        console.log('PDF.js worker configured');
-                        
-                        const arrayBuffer = await file.arrayBuffer();
-                        console.log('File converted to array buffer, size:', arrayBuffer.byteLength);
-                        const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
-                        console.log('PDF document loaded, pages:', pdf.numPages);
-                        
-                        let fullText = '';
-                        const maxPages = Math.min(pdf.numPages, 4);
-                        console.log('Extracting text from', maxPages, 'pages');
-                        for(let i=1; i<=maxPages; i++){
-                            const page = await pdf.getPage(i);
-                            const content = await page.getTextContent();
-                            fullText += content.items.map(item => item.str).join(' ');
-                        }
-                        console.log('Text extracted, length:', fullText.length);
-                        
-                        const summary = await window.fetchSummary(fullText);
-                        console.log('Summary generated');
-                        summaryContent.innerHTML = summary.replace(/\\n/g, '<br>');
-                        updateHistory(file.name.replace('.pdf',''), summary);
-                    } catch(e) {
-                        console.error('PDF summarization error:', e);
-                        summaryContent.textContent = 'Error: ' + e.message;
-                    }
-                });
-
-                document.getElementById('copySummaryBtn').addEventListener('click', () => {
-                    navigator.clipboard.writeText(summaryContent.innerText).then(() => {
-                        alert('Summary copied to clipboard.');
-                    }).catch(() => {
-                        alert('Copy failed. Please try again.');
-                    });
-                });
-
-                document.getElementById('downloadSummaryBtn').addEventListener('click', () => {
-                    const preHtml = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Summary Export</title></head><body>";
-                    const postHtml = '</body></html>';
-                    const html = preHtml + '<div style="font-family: Arial, sans-serif;">' + summaryContent.innerHTML + '</div>' + postHtml;
-                    const blob = new Blob(['\\ufeff', html], { type: 'application/msword' });
-                    const url = 'data:application/vnd.ms-word;charset=utf-8,' + encodeURIComponent(html);
-                    const name = 'literature_review_summary.doc';
-                    const downloadLink = document.createElement('a');
-                    document.body.appendChild(downloadLink);
-                    downloadLink.href = url;
-                    downloadLink.download = name;
-                    downloadLink.click();
-                    document.body.removeChild(downloadLink);
-                });
-            `;
-            popup.document.body.appendChild(initScript);
+  // Render submissions pending review list
+  const subsListContainer = document.getElementById("sup-submissions-list");
+  if (subsListContainer) {
+    if (pendingSubs.length === 0) {
+      subsListContainer.innerHTML = `<p style="color:var(--text-muted); font-size:0.9rem; text-align:center; padding:20px;">No pending submissions to review.</p>`;
+    } else {
+      subsListContainer.innerHTML = pendingSubs.map(s => {
+        const scholarName = scholars.find(sc => sc.uid === s.scholarId)?.displayName || "Scholar";
+        return `
+          <div class="submission-card" style="padding:20px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+              <div>
+                <h4 style="margin:0; font-size:1.15rem;">${escapeHtml(s.title)}</h4>
+                <p style="font-size:0.8rem; color:var(--text-muted); margin-top:2px;">Submitted by ${escapeHtml(scholarName)} on ${fmtDate(s.createdAt)}</p>
+              </div>
+              <span class="status-pill pending">Pending Review</span>
+            </div>
+            <div style="background:rgba(0,0,0,0.02); border-radius:8px; padding:12px; margin-top:12px; font-size:0.9rem; line-height:1.5; white-space:pre-wrap; border:1px solid var(--glass-border);">${escapeHtml(s.content)}</div>
             
-            // Load PDF.js externally
-            const pdfScript = popup.document.createElement('script');
-            pdfScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-            pdfScript.onload = () => {
-                console.log('PDF.js loaded successfully');
-            };
-            popup.document.head.appendChild(pdfScript);
-            
-            // Load Google Generative AI module
-            const aiScript = popup.document.createElement('script');
-            aiScript.type = 'module';
-            aiScript.textContent = `
-                import { GoogleGenerativeAI } from "https://esm.run/@google/generative-ai";
-                window.fetchSummary = async function(text) {
-                    try {
-                        const genAI = new GoogleGenerativeAI("AIzaSyBYNhCMj8o0me2Wh9p-Mfz006LbLAvLpxY");
-                        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
-                        const result = await model.generateContent("Please summarize the following research paper into an organized 500-word overview, outlining Introduction, Methods, Results, and Implications:\\n\\n" + text.substring(0, 10000));
-                        return result.response.text();
-                    } catch(err) {
-                        return "Error creating summary: " + err.message;
-                    }
-                };
-            `;
-            popup.document.body.appendChild(aiScript);
-        }, 0);
+            <div class="feedback-input-container" style="margin-top:16px;">
+              <textarea class="sup-feedback-textarea" placeholder="Write review feedback here..." style="width:100%; height:80px; padding:10px; border-radius:8px; border:1px solid var(--glass-border); outline:none; resize:vertical; background:white; font-family:inherit;"></textarea>
+              <button class="primary-btn submit-feedback-btn" data-id="${s.id}" style="margin-top:8px; padding:6px 16px;">Submit Review</button>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      subsListContainer.querySelectorAll(".submit-feedback-btn").forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.getAttribute("data-id");
+          const card = btn.closest(".submission-card");
+          const feedback = card.querySelector(".sup-feedback-textarea").value.trim();
+          if (!feedback) return alert("Please enter review feedback first.");
+          await sendSubmissionFeedback(id, feedback);
+          toast("Feedback submitted successfully.");
+          loadSupervisorDashboardStats();
+        };
+      });
+    }
+  }
+}
+
+async function setupSupervisorScholarsInteractions() {
+  const uid = auth.currentUser.uid;
+  const scholars = await fetchScholarsForSupervisor(uid);
+
+  const sidebarList = document.getElementById("scholar-select-list");
+  if (!sidebarList) return;
+
+  if (scholars.length === 0) {
+    sidebarList.innerHTML = `<p style="color:var(--text-muted); font-size:0.85rem; text-align:center; padding-top:20px;">No assigned scholars.</p>`;
+    return;
+  }
+
+  // Parse active scholar from URL
+  const params = new URLSearchParams(window.location.search);
+  const activeScholarUid = params.get("scholar");
+
+  sidebarList.innerHTML = scholars.map(s => {
+    const activeClass = s.uid === activeScholarUid ? "active" : "";
+    return `
+      <div class="history-item ${activeClass} sup-scholar-item" data-uid="${s.uid}">
+        <div class="history-title">${escapeHtml(s.displayName)}</div>
+      </div>
+    `;
+  }).join("");
+
+  // Bind sidebar select clicks
+  sidebarList.querySelectorAll(".sup-scholar-item").forEach(item => {
+    item.onclick = () => {
+      const scholarUid = item.getAttribute("data-uid");
+      const url = new URL(window.location);
+      url.searchParams.set("page", "scholars");
+      url.searchParams.set("scholar", scholarUid);
+      window.history.pushState({}, "", url);
+      loadViewByRoute();
+    };
+  });
+
+  if (activeScholarUid) {
+    const selectedScholar = scholars.find(s => s.uid === activeScholarUid);
+    if (selectedScholar) {
+      const milestones = await fetchMilestonesForScholar(activeScholarUid);
+      renderScholarMilestoneDetails(selectedScholar, milestones);
+    }
+  }
+}
+
+function renderScholarMilestoneDetails(scholar, milestones) {
+  const container = document.getElementById("scholar-details-container");
+  if (!container) return;
+
+  container.innerHTML = getScholarMilestoneDetailsHTML(scholar, milestones);
+
+  // Bind status changes
+  container.querySelectorAll(".milestone-status-select").forEach(select => {
+    select.onchange = async (e) => {
+      const row = select.closest("tr");
+      const id = row.getAttribute("data-milestone-id");
+      const status = e.target.value;
+      await updateMilestone(id, { status });
+      toast("Milestone status updated.");
+      setupSupervisorScholarsInteractions(); // Reload milestones list
+    };
+  });
+
+  // Bind add milestone buttons
+  const addBtn = document.getElementById("sup-add-milestone-btn");
+  const formContainer = document.getElementById("add-milestone-form-container");
+  if (addBtn && formContainer) {
+    addBtn.onclick = () => {
+      formContainer.style.display = "block";
+      formContainer.scrollIntoView({ behavior: "smooth" });
+    };
+  }
+
+  const cancelBtn = document.getElementById("cancel-milestone-btn");
+  if (cancelBtn && formContainer) {
+    cancelBtn.onclick = () => {
+      formContainer.style.display = "none";
+    };
+  }
+
+  const saveBtn = document.getElementById("save-milestone-btn");
+  if (saveBtn && formContainer) {
+    saveBtn.onclick = async () => {
+      const title = document.getElementById("new-milestone-title").value.trim();
+      const dueDate = document.getElementById("new-milestone-due").value;
+      const note = document.getElementById("new-milestone-note").value.trim();
+
+      if (!title || !dueDate) {
+        return alert("Please enter title and due date.");
+      }
+
+      await createMilestone({
+        scholarId: scholar.uid,
+        supervisorId: auth.currentUser.uid,
+        title,
+        dueDate,
+        status: "pending",
+        note,
+        supervisorNote: ""
+      });
+
+      toast("Milestone added successfully.");
+      setupSupervisorScholarsInteractions(); // Reload
+    };
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   MAIN APP BOOTSTRAP
+   ═══════════════════════════════════════════════════════ */
+
+document.addEventListener("DOMContentLoaded", () => {
+  const googleLoginBtn = document.getElementById("google-login-btn");
+  const loginLoader = document.getElementById("login-loader");
+  const loginView = document.getElementById("login-view");
+  const emailInput = document.getElementById("email-input");
+  const passwordInput = document.getElementById("password-input");
+  const emailSigninBtn = document.getElementById("email-signin-btn");
+  const emailSignupBtn = document.getElementById("email-signup-btn");
+  const appView = document.getElementById("app-view");
+  const btnText = googleLoginBtn?.querySelector("span");
+  const userAvatar = document.getElementById("user-avatar");
+
+  // Floating chatbot elements
+  const floatingBtn = document.getElementById("parama-float-btn");
+  const floatingPopup = document.getElementById("parama-chat-popup");
+  const closeParamaBtn = document.getElementById("close-parama-btn");
+  const floatingInput = document.getElementById("floating-chat-input");
+  const floatingSend = document.getElementById("floating-send-btn");
+  const floatingMessages = document.getElementById("floating-chat-messages");
+
+  // Initialize Sync status badge
+  updateSyncStatusBadge(getSyncMode());
+
+  // Listen to mode changes
+  window.addEventListener("imra-mode-change", (e) => {
+    updateSyncStatusBadge(e.detail.mode);
+  });
+
+  // Re-sync click handler
+  const badge = document.getElementById("sync-status-indicator");
+  if (badge) {
+    badge.onclick = () => {
+      if (getSyncMode() === "local") {
+        if (confirm("Would you like to retry Cloud Sync? If Firestore Rules are updated, this will reconnect to the cloud database.")) {
+          resetFallbackMode();
+          window.location.reload();
+        }
+      }
+    };
+  }
+
+  function toggleChatPopup() {
+    floatingPopup.classList.toggle("hidden");
+    if (!floatingPopup.classList.contains("hidden")) floatingInput?.focus();
+  }
+
+  async function bootstrapUserProfile(user) {
+    if (!user?.email || !isInstituteEmail(user.email)) {
+      await signOut(auth);
+      throw new Error(`Please sign in with your @${INSTITUTE_DOMAIN} account.`);
     }
 
-    function setupLibraryInteractions() {
-        const fileUpload = document.getElementById('file-upload');
-        const folderUpload = document.getElementById('folder-upload');
-        const uploadActions = document.getElementById('upload-actions');
-        const saveUpload = document.getElementById('save-upload');
-        const cancelUpload = document.getElementById('cancel-upload');
-        const uploadStatus = document.getElementById('upload-status');
-        const folderUploadActions = document.getElementById('folder-upload-actions');
-        const saveFolderUpload = document.getElementById('save-folder-upload');
-        const cancelFolderUpload = document.getElementById('cancel-folder-upload');
-        const folderUploadStatus = document.getElementById('folder-upload-status');
+    let profile = await fetchProfile(user.uid);
+    if (profile) return profile;
 
-        let selectedFiles = [];
-        let selectedFolderFiles = [];
+    const selectedRole = document.querySelector(".role-tab.active")?.dataset.role || "scholar";
+    profile = await createProfile(user.uid, {
+      email: user.email,
+      displayName: user.displayName || user.email.split("@")[0],
+      photoURL: user.photoURL || "",
+      role: selectedRole === "supervisor" ? "supervisor" : "scholar",
+      supervisorId: "",
+      department: "",
+    });
+    return profile;
+  }
 
-        // Tab switching
-        const tabButtons = document.querySelectorAll('.tab-btn');
-        const tabContents = document.querySelectorAll('.file-list');
+  function showFirestoreSetup(user, error) {
+    console.error("Firestore profile bootstrap failed:", error);
+    const dashboardContent = document.getElementById("dashboard-content");
+    if (dashboardContent) {
+      dashboardContent.innerHTML = getFirestoreSetupHTML(user?.email || "");
+      document.getElementById("retry-profile-btn")?.addEventListener("click", () => window.location.reload());
+      document.getElementById("permission-signout-btn")?.addEventListener("click", () => signOut(auth));
+    }
+    toast("Signed in, but Firestore permissions are blocking the profile.", "error");
+  }
 
-        tabButtons.forEach(btn => {
-            btn.addEventListener('click', () => {
-                tabButtons.forEach(b => b.classList.remove('active'));
-                tabContents.forEach(c => c.classList.remove('active'));
-                btn.classList.add('active');
-                const tabId = btn.getAttribute('data-tab') + '-files';
-                document.getElementById(tabId).classList.add('active');
-            });
+  // Auth monitoring
+  onAuthStateChanged(auth, async (user) => {
+    const loader = document.getElementById("auth-loader");
+    if (loader) loader.classList.add("fade-out");
+
+    if (user) {
+      loginView.classList.add("hidden");
+      loginView.classList.remove("active-view");
+      appView.classList.remove("hidden");
+
+      if (userAvatar) {
+        userAvatar.src = user.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName || "Scholar")}&background=random&color=fff`;
+      }
+
+      setTimeout(() => {
+        appView.classList.add("active-view");
+      }, 50);
+
+      try {
+        myProfile = await bootstrapUserProfile(user);
+        renderSidebarNav(myProfile.role);
+        loadViewByRoute();
+      } catch (error) {
+        showFirestoreSetup(user, error);
+      }
+
+      if (floatingMessages) loadChatHistory(user.uid, floatingMessages);
+    } else {
+      appView.classList.remove("active-view");
+      setTimeout(() => {
+        appView.classList.add("hidden");
+        loginView.classList.remove("hidden");
+        setTimeout(() => loginView.classList.add("active-view"), 50);
+      }, 500);
+    }
+  });
+
+  // Login event handlers
+  if (emailSigninBtn) {
+    emailSigninBtn.addEventListener("click", () => {
+      const email = emailInput.value.trim();
+      const password = passwordInput.value.trim();
+      if (!email || !password) return alert("Please enter both email and password.");
+      emailSigninBtn.innerHTML = "Signing in...";
+      emailSigninBtn.style.pointerEvents = "none";
+
+      signInWithEmailAndPassword(auth, email, password)
+        .catch((error) => {
+          console.error(error);
+          alert("Sign-in Failed: " + error.message);
+        })
+        .finally(() => {
+          emailSigninBtn.innerHTML = "Sign In";
+          emailSigninBtn.style.pointerEvents = "auto";
         });
+    });
+  }
 
-        // Load existing files
-        loadLibraryFiles();
+  if (emailSignupBtn) {
+    emailSignupBtn.addEventListener("click", () => {
+      const email = emailInput.value.trim();
+      const password = passwordInput.value.trim();
+      if (!email || !password) return alert("Please enter both email and password.");
+      emailSignupBtn.innerHTML = "Creating...";
+      emailSignupBtn.style.pointerEvents = "none";
 
-        // File upload selection
-        if(fileUpload) {
-            fileUpload.addEventListener('change', (e) => {
-                selectedFiles = Array.from(e.target.files);
-                if(selectedFiles.length > 0) {
-                    uploadActions.style.display = 'block';
-                }
-            });
-        }
-
-        if(saveUpload) {
-            saveUpload.addEventListener('click', async () => {
-                if(selectedFiles.length === 0) return alert('Please select files first.');
-                saveUpload.disabled = true;
-                cancelUpload.disabled = true;
-                uploadStatus.textContent = 'Uploading files...';
-                await uploadSelectedFiles(selectedFiles);
-                selectedFiles = [];
-                fileUpload.value = '';
-                uploadActions.style.display = 'none';
-                await loadLibraryFiles();
-                uploadStatus.textContent = 'Files uploaded and saved to cloud.';
-                saveUpload.disabled = false;
-                cancelUpload.disabled = false;
-            });
-        }
-
-        if(cancelUpload) {
-            cancelUpload.addEventListener('click', () => {
-                selectedFiles = [];
-                fileUpload.value = '';
-                uploadActions.style.display = 'none';
-            });
-        }
-
-        // Folder upload selection
-        if(folderUpload) {
-            folderUpload.addEventListener('change', (e) => {
-                selectedFolderFiles = Array.from(e.target.files);
-                if(selectedFolderFiles.length > 0) {
-                    folderUploadActions.style.display = 'block';
-                }
-            });
-        }
-
-        if(saveFolderUpload) {
-            saveFolderUpload.addEventListener('click', async () => {
-                if(selectedFolderFiles.length === 0) return alert('Please select a folder first.');
-                saveFolderUpload.disabled = true;
-                cancelFolderUpload.disabled = true;
-                folderUploadStatus.textContent = 'Uploading folder files...';
-                await uploadSelectedFiles(selectedFolderFiles);
-                selectedFolderFiles = [];
-                folderUpload.value = '';
-                folderUploadActions.style.display = 'none';
-                await loadLibraryFiles();
-                folderUploadStatus.textContent = 'Folder files uploaded and saved to cloud.';
-                saveFolderUpload.disabled = false;
-                cancelFolderUpload.disabled = false;
-            });
-        }
-
-        if(cancelFolderUpload) {
-            cancelFolderUpload.addEventListener('click', () => {
-                selectedFolderFiles = [];
-                folderUpload.value = '';
-                folderUploadActions.style.display = 'none';
-            });
-        }
-
-        async function uploadSelectedFiles(files) {
-            if(!files || files.length === 0) {
-                alert('No files selected to upload.');
-                return;
-            }
-
-            const user = auth.currentUser;
-            if(!user) return alert('Please log in first.');
-
-            let successCount = 0;
-            for(let file of files) {
-                const filePath = file.webkitRelativePath || file.name;
-                const storageRef = ref(storage, `users/${user.uid}/library/${filePath}`);
-                try {
-                    await uploadBytes(storageRef, file);
-                    successCount++;
-                } catch(error) {
-                    console.error('Upload failed:', error);
-                    alert('Upload failed for ' + file.name + ': ' + error.message);
-                }
-            }
-
-            if(successCount > 0) {
-                alert(`${successCount} file(s) uploaded successfully to cloud storage!`);
-            }
-        }
-
-        function addFileToLists(filePath, url) {
-            const fileName = filePath.split('/').pop();
-            const fileExt = fileName.split('.').pop().toLowerCase();
-
-            const li = document.createElement('li');
-            li.innerHTML = `<i class="ri-file-line"></i> ${fileName}`;
-            li.style.cursor = 'pointer';
-            li.addEventListener('click', () => {
-                if(fileExt === 'pdf') {
-                    sessionStorage.setItem('pdfViewerUrl', url);
-                    dashboardContent.innerHTML = getPdfViewerHTML();
-                    setupPdfViewerInteractions();
-                } else {
-                    window.open(url, '_blank');
-                }
-            });
-
-            // Add to all
-            document.getElementById('all-file-list').appendChild(li.cloneNode(true));
-
-            // Add to specific tabs
-            if(fileExt === 'pdf') {
-                document.getElementById('pdf-file-list').appendChild(li.cloneNode(true));
-            } else if(['doc', 'docx'].includes(fileExt)) {
-                document.getElementById('doc-file-list').appendChild(li.cloneNode(true));
-            } else {
-                document.getElementById('other-file-list').appendChild(li.cloneNode(true));
-            }
-        }
-
-        async function loadLibraryFiles() {
-            const user = auth.currentUser;
-            if(!user) return;
-
-            const libraryRef = ref(storage, `users/${user.uid}/library/`);
-            try {
-                const result = await listAll(libraryRef);
-                const files = result.items;
-
-                // Clear lists
-                document.getElementById('all-file-list').innerHTML = '';
-                document.getElementById('pdf-file-list').innerHTML = '';
-                document.getElementById('doc-file-list').innerHTML = '';
-                document.getElementById('other-file-list').innerHTML = '';
-
-                for(let fileRef of files) {
-                    const url = await getDownloadURL(fileRef);
-                    const fileName = fileRef.name;
-                    const fileExt = fileName.split('.').pop().toLowerCase();
-
-                    const li = document.createElement('li');
-                    li.innerHTML = `<i class="ri-file-line"></i> ${fileName}`;
-                    li.style.cursor = 'pointer';
-                    li.addEventListener('click', () => {
-                        if(fileExt === 'pdf') {
-                            sessionStorage.setItem('pdfViewerUrl', url);
-                            dashboardContent.innerHTML = getPdfViewerHTML();
-                            setupPdfViewerInteractions();
-                        } else {
-                            window.open(url, '_blank');
-                        }
-                    });
-
-                    // Add to all
-                    document.getElementById('all-file-list').appendChild(li.cloneNode(true));
-
-                    // Add to specific tabs
-                    if(fileExt === 'pdf') {
-                        document.getElementById('pdf-file-list').appendChild(li.cloneNode(true));
-                    } else if(['doc', 'docx'].includes(fileExt)) {
-                        document.getElementById('doc-file-list').appendChild(li.cloneNode(true));
-                    } else {
-                        document.getElementById('other-file-list').appendChild(li.cloneNode(true));
-                    }
-                }
-            } catch(error) {
-                console.error('Error loading files:', error);
-            }
-        }
-    }
-
-    function setupPdfViewerInteractions() {
-        // Set PDF.js worker
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
-        const backBtn = document.getElementById('pdf-viewer-back-btn');
-        if(backBtn) {
-            backBtn.addEventListener('click', () => {
-                dashboardContent.innerHTML = getLibraryHTML();
-                setupLibraryInteractions();
-            });
-        }
-
-        // Load the PDF if url is stored
-        const pdfUrl = sessionStorage.getItem('pdfViewerUrl');
-        if(pdfUrl) {
-            loadPdfInViewer(pdfUrl);
-        }
-    }
-
-    function loadPdfInViewer(url) {
-        const renderArea = document.getElementById('pdf-viewer-render-area');
-        if(!renderArea) return;
-
-        pdfjsLib.getDocument(url).promise.then(function(pdf) {
-            renderArea.innerHTML = '<canvas id="pdf-canvas"></canvas>';
-            const canvas = document.getElementById('pdf-canvas');
-            const context = canvas.getContext('2d');
-
-            pdf.getPage(1).then(function(page) {
-                const viewport = page.getViewport({scale: 1.5});
-                canvas.height = viewport.height;
-                canvas.width = viewport.width;
-
-                const renderContext = {
-                    canvasContext: context,
-                    viewport: viewport
-                };
-                page.render(renderContext);
-            });
-        }).catch(function(error) {
-            renderArea.innerHTML = '<div style="color: red;">Error loading PDF: ' + error.message + '</div>';
+      createUserWithEmailAndPassword(auth, email, password)
+        .catch((error) => {
+          console.error(error);
+          alert("Sign-up Failed: " + error.message);
+        })
+        .finally(() => {
+          emailSignupBtn.innerHTML = "Sign Up";
+          emailSignupBtn.style.pointerEvents = "auto";
         });
-    }
+    });
+  }
 
-    function setupEditingInteractions() {
-        const content = document.getElementById('dashboard-content');
-        
-        const e1 = document.getElementById('hub-edit-grammar');
-        if(e1) {
-            e1.removeEventListener('click', e1._grammarHandler);
-            e1._grammarHandler = () => { 
-                content.innerHTML = getGrammarHTML(); 
-                setupGrammarInteractions(); 
-            };
-            e1.addEventListener('click', e1._grammarHandler);
-        }
-        
-        const e2 = document.getElementById('hub-edit-plag-scan');
-        if(e2) {
-            e2.removeEventListener('click', e2._plagScanHandler);
-            e2._plagScanHandler = () => { 
-                content.innerHTML = getPlagScanHTML(); 
-                setupPlagScanInteractions(); 
-            };
-            e2.addEventListener('click', e2._plagScanHandler);
-        }
-        
-        const e3 = document.getElementById('hub-edit-plag-rem');
-        if(e3) {
-            e3.removeEventListener('click', e3._plagRemHandler);
-            e3._plagRemHandler = () => { 
-                content.innerHTML = getPlagRemHTML(); 
-                setupPlagRemInteractions(); 
-            };
-            e3.addEventListener('click', e3._plagRemHandler);
-        }
-        
-        const e4 = document.getElementById('hub-edit-para');
-        if(e4) {
-            e4.removeEventListener('click', e4._paraHandler);
-            e4._paraHandler = () => { 
-                content.innerHTML = getParaphraseHTML(); 
-                setupParaphraseInteractions(); 
-            };
-            e4.addEventListener('click', e4._paraHandler);
-        }
-        
-        const e5 = document.getElementById('hub-edit-ai-chk');
-        if(e5) {
-            e5.removeEventListener('click', e5._aiChkHandler);
-            e5._aiChkHandler = () => { 
-                content.innerHTML = getAiCheckHTML(); 
-                setupAiCheckInteractions(); 
-            };
-            e5.addEventListener('click', e5._aiChkHandler);
-        }
-        
-        const e6 = document.getElementById('hub-edit-reduce');
-        if(e6) {
-            e6.removeEventListener('click', e6._reduceHandler);
-            e6._reduceHandler = () => { 
-                content.innerHTML = getAiReduceHTML(); 
-                setupAiReduceInteractions(); 
-            };
-            e6.addEventListener('click', e6._reduceHandler);
-        }
-    }
+  if (googleLoginBtn) {
+    googleLoginBtn.addEventListener("click", () => {
+      loginLoader.classList.remove("hidden");
+      if (btnText) btnText.textContent = "Authenticating Cloud...";
+      googleLoginBtn.style.pointerEvents = "none";
 
-    setupDashboardInteractions();
+      signInWithPopup(auth, provider).catch((error) => {
+        console.error(error);
+        alert("Login Failed: " + error.message);
+        loginLoader.classList.add("hidden");
+        if (btnText) btnText.textContent = "Continue with Google";
+        googleLoginBtn.style.pointerEvents = "auto";
+      });
+    });
+  }
 
+  if (userAvatar) {
+    userAvatar.onclick = () => {
+      if (confirm("Do you want to sign out?")) signOut(auth);
+    };
+  }
+
+  // Floating Chatbot widgets
+  if (floatingBtn) floatingBtn.onclick = toggleChatPopup;
+  if (closeParamaBtn) closeParamaBtn.onclick = () => floatingPopup.classList.add("hidden");
+
+  if (floatingSend) {
+    const handleFloatingSend = async () => {
+      const userText = floatingInput.value.trim();
+      if (!userText) return;
+
+      floatingMessages.innerHTML += `<div class="message user-msg">${escapeHtml(userText)}</div>`;
+      floatingInput.value = "";
+      floatingMessages.scrollTop = floatingMessages.scrollHeight;
+
+      const currentUser = auth.currentUser;
+      if (currentUser) await saveChatMessage(currentUser.uid, "user", userText);
+
+      const typingId = "typing-" + Date.now();
+      floatingMessages.innerHTML += `<div class="message ai-msg" id="${typingId}"><i class="ri-loader-4-line ri-spin"></i> Parama is thinking...</div>`;
+
+      try {
+        const aiResponse = await callApi("/api/ai/chat", { message: userText });
+        if (currentUser) await saveChatMessage(currentUser.uid, "ai", aiResponse);
+
+        document.getElementById(typingId)?.remove();
+        floatingMessages.innerHTML += `<div class="message ai-msg">${formatAIText(aiResponse)}</div>`;
+        floatingMessages.scrollTop = floatingMessages.scrollHeight;
+      } catch (err) {
+        document.getElementById(typingId)?.remove();
+        floatingMessages.innerHTML += `<div class="message ai-msg" style="color:red;">Error: ${err.message}</div>`;
+      }
+    };
+
+    floatingSend.onclick = handleFloatingSend;
+    floatingInput.onkeypress = (e) => {
+      if (e.key === "Enter") handleFloatingSend();
+    };
+  }
+
+  // Dynamic Sidebar nav click delegate
+  const navMenu = document.getElementById("sidebar-nav");
+  if (navMenu) {
+    navMenu.addEventListener("click", (e) => {
+      const link = e.target.closest(".nav-link");
+      if (!link) return;
+      e.preventDefault();
+
+      const target = link.getAttribute("data-target");
+      if (target === "chatbot") {
+        toggleChatPopup();
+        return;
+      }
+
+      loadView(target);
+    });
+  }
+
+  // Login view role buttons toggle
+  const roleTabs = document.querySelector(".role-tabs");
+  if (roleTabs) {
+    roleTabs.addEventListener("click", (e) => {
+      const tab = e.target.closest(".role-tab");
+      if (!tab) return;
+      roleTabs.querySelectorAll(".role-tab").forEach(t => t.classList.remove("active"));
+      tab.classList.add("active");
+    });
+  }
 });
