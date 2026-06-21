@@ -365,6 +365,26 @@
   <div id="modal-root" class="modal-root hidden"></div>
   <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
 
+  <script>
+    window.setTimeout(function () {
+      var loader = document.getElementById("auth-loader");
+      var loginView = document.getElementById("login-view");
+      var appView = document.getElementById("app-view");
+      if (!loader || loader.classList.contains("hidden")) return;
+      loader.classList.add("fade-out");
+      window.setTimeout(function () {
+        loader.classList.add("hidden");
+      }, 450);
+      if (appView) {
+        appView.classList.add("hidden");
+        appView.classList.remove("active-view");
+      }
+      if (loginView) {
+        loginView.classList.remove("hidden");
+        loginView.classList.add("active-view");
+      }
+    }, 8000);
+  </script>
   <script type="module" src="app.js"></script>
 
 </body>
