@@ -47,7 +47,16 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // Serve all frontend static files from project root
-app.use(express.static(path.join(__dirname)));
+app.use(
+  express.static(path.join(__dirname), {
+    index: false,
+    extensions: false,
+  })
+);
+
+app.get(["/app.js", "/style.css", "/logo.png", "/parama-avatar.svg", "/favicon.ico", "/favicon.png"], (req, res) => {
+  res.sendFile(path.join(__dirname, req.path));
+});
 
 /* -------------------------------------------------------
    Mount API Router
