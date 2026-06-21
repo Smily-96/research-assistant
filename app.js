@@ -9,6 +9,7 @@ import {
 } from "./src/firebase-config.js";
 
 import {
+  INSTITUTE_DOMAIN,
   isInstituteEmail,
   toast,
   escapeHtml,
@@ -1628,6 +1629,22 @@ document.addEventListener("DOMContentLoaded", () => {
   // Initialize Sync status badge
   updateSyncStatusBadge(getSyncMode());
 
+  function hideAuthLoader() {
+    const loader = document.getElementById("auth-loader");
+    if (!loader) return;
+    loader.classList.add("fade-out");
+    setTimeout(() => loader.classList.add("hidden"), 450);
+  }
+
+  const authFallbackTimer = setTimeout(() => {
+    if (auth.currentUser) return;
+    hideAuthLoader();
+    appView.classList.add("hidden");
+    loginView.classList.remove("hidden");
+    loginView.classList.add("active-view");
+    toast("Session check took too long. Please sign in again.", "error");
+  }, 8000);
+
   // Listen to mode changes
   window.addEventListener("imra-mode-change", (e) => {
     updateSyncStatusBadge(e.detail.mode);
@@ -1685,8 +1702,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Auth monitoring
   onAuthStateChanged(auth, async (user) => {
-    const loader = document.getElementById("auth-loader");
-    if (loader) loader.classList.add("fade-out");
+    clearTimeout(authFallbackTimer);
+    hideAuthLoader();
 
     if (user) {
       loginView.classList.add("hidden");
