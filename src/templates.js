@@ -629,6 +629,15 @@ export function getSupervisorDashboardHTML(userProfile = {}) {
     </div>
 
     <div class="supervisor-shell">
+      <div class="glass-panel" style="padding:20px; margin-bottom:24px;">
+        <div class="panel-header" style="margin-bottom:15px; padding-bottom:10px;">
+          <h3>Scholar Requests</h3>
+        </div>
+        <div id="sup-requests-list" style="display:flex; flex-direction:column; gap:10px;">
+          <p style="color:var(--text-muted); font-size:0.9rem; text-align:center; padding:12px;">Loading requests...</p>
+        </div>
+      </div>
+
       <div class="workflow-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap:24px;">
         
         <!-- Scholars Section -->

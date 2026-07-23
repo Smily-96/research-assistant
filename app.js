@@ -51,6 +51,9 @@ import {
   updateProfile,
   fetchSupervisors,
   fetchScholarsForSupervisor,
+  sendSupervisorRequest,
+  fetchSupervisorRequests,
+  respondToSupervisorRequest,
   createMilestone,
   updateMilestone,
   fetchMilestonesForScholar,
@@ -94,7 +97,8 @@ async function callApi(endpoint, payload) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.error || "Request failed");
+      const detail = data.details ? ` ${data.details}` : "";
+      throw new Error(`${data.error || "Request failed"}${detail}`);
     }
     return data.result || data;
   } catch (err) {
@@ -113,53 +117,70 @@ async function checkScholarSupervisorSetup() {
   const dashboardContent = document.getElementById("dashboard-content");
   if (!dashboardContent) return false;
 
+  const existingRequests = await fetchSupervisorRequests().catch(() => []);
+  const pendingRequest = existingRequests.find((item) => item.status === "pending");
+  const supervisors = await fetchSupervisors().catch(() => []);
+  const supervisorOptions = supervisors
+    .map((supervisor) => {
+      const name = supervisor.displayName || supervisor.email || "Supervisor";
+      const department = supervisor.department ? ` - ${supervisor.department}` : "";
+      return `<option value="${escapeHtml(supervisor.email || "")}">${escapeHtml(name)}${escapeHtml(department)}</option>`;
+    })
+    .join("");
+
   dashboardContent.innerHTML = `
     <div class="dashboard-header">
       <h2>Welcome to ImRa, Scholar!</h2>
-      <p>Please complete your profile setup to continue.</p>
+      <p>Select your research supervisor and send a request for approval.</p>
     </div>
     <div class="workflow-card glass-panel" style="max-width:540px; margin-top:20px; padding:24px;">
-      <h3 style="margin-bottom:16px;">Profile Setup</h3>
+      <h3 style="margin-bottom:16px;">Supervisor Request</h3>
+      ${pendingRequest ? `
+        <div class="status-pill pending" style="margin-bottom:14px;">Pending approval from ${escapeHtml(pendingRequest.supervisorEmail || "supervisor")}</div>
+      ` : ""}
       <div class="form-grid">
         <div>
-          <label style="font-size:0.85rem; font-weight:600; display:block; margin-bottom:6px;">Select Your Research Supervisor</label>
-          <select id="setup-supervisor-id" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--glass-border); outline:none; background:white;">
-            <option value="">-- Loading Supervisors... --</option>
-          </select>
+          <label style="font-size:0.85rem; font-weight:600; display:block; margin-bottom:6px;">Supervisor</label>
+          ${supervisors.length ? `
+            <select id="setup-supervisor-email" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--glass-border); outline:none; background:white;">
+              <option value="">Choose a supervisor</option>
+              ${supervisorOptions}
+            </select>
+          ` : `
+            <div class="status-pill pending" style="display:block; line-height:1.5; margin-bottom:8px;">No supervisor accounts are available yet.</div>
+            <input type="email" id="setup-supervisor-email" placeholder="supervisor@kanchiuniv.ac.in" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--glass-border); outline:none; background:white;" />
+          `}
         </div>
         <div>
           <label style="font-size:0.85rem; font-weight:600; display:block; margin-bottom:6px;">Academic Department</label>
-          <input type="text" id="setup-department" placeholder="e.g. Computer Science" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--glass-border); outline:none; background:white;" />
+          <input type="text" id="setup-department" value="${escapeHtml(myProfile.department || "")}" placeholder="e.g. Computer Science" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--glass-border); outline:none; background:white;" />
         </div>
-        <button class="primary-btn" id="save-setup-btn" style="margin-top:16px; width:100%; padding:12px;">Complete Registration</button>
+        <div>
+          <label style="font-size:0.85rem; font-weight:600; display:block; margin-bottom:6px;">Message</label>
+          <textarea id="setup-request-message" placeholder="Please accept me as your scholar." style="width:100%; min-height:90px; padding:10px; border-radius:8px; border:1px solid var(--glass-border); outline:none; background:white;"></textarea>
+        </div>
+        <button class="primary-btn" id="save-setup-btn" style="margin-top:16px; width:100%; padding:12px;">Send Request</button>
       </div>
     </div>
   `;
 
-  // Fetch supervisors
-  const supervisors = await fetchSupervisors();
-  const select = document.getElementById("setup-supervisor-id");
-  if (select) {
-    if (supervisors.length === 0) {
-      select.innerHTML = '<option value="">No supervisors found. Enter manually under local fallback.</option>';
-    } else {
-      select.innerHTML = '<option value="">-- Choose Supervisor --</option>' + 
-        supervisors.map(s => `<option value="${s.uid}">${escapeHtml(s.displayName)} (${escapeHtml(s.department || "No Department")})</option>`).join("");
-    }
-  }
-
   document.getElementById("save-setup-btn").onclick = async () => {
-    const supervisorId = document.getElementById("setup-supervisor-id").value;
+    const supervisorEmail = document.getElementById("setup-supervisor-email").value.trim().toLowerCase();
     const department = document.getElementById("setup-department").value.trim();
+    const message = document.getElementById("setup-request-message").value.trim();
 
-    if (!supervisorId) {
-      return alert("Please select your research supervisor.");
+    if (!supervisorEmail) {
+      return alert("Please choose a supervisor.");
     }
 
-    await updateProfile(auth.currentUser.uid, { supervisorId, department });
-    myProfile.supervisorId = supervisorId;
+    if (!supervisorEmail.endsWith("@kanchiuniv.ac.in")) {
+      return alert("Please enter a valid @kanchiuniv.ac.in supervisor email.");
+    }
+
+    await updateProfile(auth.currentUser.uid, { department });
+    await sendSupervisorRequest(supervisorEmail, department, message);
     myProfile.department = department;
-    toast("Profile updated successfully!");
+    toast("Request sent to supervisor.");
     loadViewByRoute();
   };
 
@@ -647,6 +668,10 @@ function setupLitReviewInteractions() {
       if (!e.target.files.length) return;
       const outContent = subToolLoading("lit-review", "Extracting papers and generating literature review");
       const text = await extractTextFromMultiplePDFs(e.target.files);
+      if (!text.trim()) {
+        outContent.innerHTML = `<span style="color:red;">Error: No readable text found in the uploaded PDF. Please try a text-based PDF, not a scanned image PDF.</span>`;
+        return;
+      }
       
       try {
         const response = await callApi("/api/literature/review", { text: text.substring(0, 20000) });
@@ -1373,6 +1398,48 @@ function setupSupervisorDashboardInteractions() {
 async function loadSupervisorDashboardStats() {
   const uid = auth.currentUser.uid;
 
+  const requests = await fetchSupervisorRequests();
+  const pendingRequests = requests.filter((item) => item.status === "pending");
+  const requestsContainer = document.getElementById("sup-requests-list");
+  if (requestsContainer) {
+    if (pendingRequests.length === 0) {
+      requestsContainer.innerHTML = `<p style="color:var(--text-muted); font-size:0.9rem; text-align:center; padding:12px;">No new scholar requests.</p>`;
+    } else {
+      requestsContainer.innerHTML = pendingRequests.map((request) => `
+        <div class="student-card" style="padding:15px;">
+          <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start;">
+            <div>
+              <h4 style="margin:0;">${escapeHtml(request.scholarName || "Scholar request")}</h4>
+              <p style="font-size:0.85rem; color:var(--text-muted); margin-top:3px;">${escapeHtml(request.scholarEmail || "")}</p>
+              <p style="font-size:0.85rem; margin-top:8px;">${escapeHtml(request.message || "Please accept me as your scholar.")}</p>
+              ${request.department ? `<p style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">Department: ${escapeHtml(request.department)}</p>` : ""}
+            </div>
+            <span class="status-pill pending">New</span>
+          </div>
+          <div class="inline-actions" style="margin-top:12px;">
+            <button class="primary-btn accept-supervisor-request" data-id="${request.id}" style="padding:6px 12px;">Accept</button>
+            <button class="secondary-btn reject-supervisor-request" data-id="${request.id}" style="padding:6px 12px; border-color:#ef4444; color:#ef4444;">Reject</button>
+          </div>
+        </div>
+      `).join("");
+
+      requestsContainer.querySelectorAll(".accept-supervisor-request").forEach((btn) => {
+        btn.onclick = async () => {
+          await respondToSupervisorRequest(btn.dataset.id, "accepted", "Accepted by supervisor.");
+          toast("Scholar request accepted.");
+          loadSupervisorDashboardStats();
+        };
+      });
+      requestsContainer.querySelectorAll(".reject-supervisor-request").forEach((btn) => {
+        btn.onclick = async () => {
+          await respondToSupervisorRequest(btn.dataset.id, "rejected", "Rejected by supervisor.");
+          toast("Scholar request rejected.", "error");
+          loadSupervisorDashboardStats();
+        };
+      });
+    }
+  }
+
   const scholars = await fetchScholarsForSupervisor(uid);
   const scholarsEl = document.getElementById("sup-stats-scholars");
   if (scholarsEl) scholarsEl.innerText = scholars.length;
@@ -1675,7 +1742,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     let profile = await fetchProfile(user.uid);
-    if (profile) return profile;
+    if (profile) {
+      profile.role = String(profile.role || "scholar").toLowerCase();
+      return profile;
+    }
 
     const selectedRole = document.querySelector(".role-tab.active")?.dataset.role || "scholar";
     profile = await createProfile(user.uid, {
@@ -1686,6 +1756,7 @@ document.addEventListener("DOMContentLoaded", () => {
       supervisorId: "",
       department: "",
     });
+    profile.role = String(profile.role || "scholar").toLowerCase();
     return profile;
   }
 
@@ -1720,6 +1791,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       try {
         myProfile = await bootstrapUserProfile(user);
+        myProfile.role = String(myProfile.role || "scholar").toLowerCase();
         renderSidebarNav(myProfile.role);
         loadViewByRoute();
       } catch (error) {
@@ -1743,6 +1815,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const email = emailInput.value.trim();
       const password = passwordInput.value.trim();
       if (!email || !password) return alert("Please enter both email and password.");
+      if (!isInstituteEmail(email)) return alert("Please use your @kanchiuniv.ac.in email.");
       emailSigninBtn.innerHTML = "Signing in...";
       emailSigninBtn.style.pointerEvents = "none";
 
@@ -1763,6 +1836,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const email = emailInput.value.trim();
       const password = passwordInput.value.trim();
       if (!email || !password) return alert("Please enter both email and password.");
+      if (!isInstituteEmail(email)) return alert("Please use your @kanchiuniv.ac.in email.");
       emailSignupBtn.innerHTML = "Creating...";
       emailSignupBtn.style.pointerEvents = "none";
 
@@ -1784,13 +1858,22 @@ document.addEventListener("DOMContentLoaded", () => {
       if (btnText) btnText.textContent = "Authenticating Cloud...";
       googleLoginBtn.style.pointerEvents = "none";
 
-      signInWithPopup(auth, provider).catch((error) => {
-        console.error(error);
-        alert("Login Failed: " + error.message);
-        loginLoader.classList.add("hidden");
-        if (btnText) btnText.textContent = "Continue with Google";
-        googleLoginBtn.style.pointerEvents = "auto";
-      });
+      signInWithPopup(auth, provider)
+        .then(async (result) => {
+          if (!isInstituteEmail(result.user?.email || "")) {
+            await signOut(auth);
+            alert("Google login is allowed only for @kanchiuniv.ac.in accounts.");
+          }
+        })
+        .catch((error) => {
+          console.error(error);
+          alert("Login Failed: " + error.message);
+        })
+        .finally(() => {
+          loginLoader.classList.add("hidden");
+          if (btnText) btnText.textContent = "Continue with Google";
+          googleLoginBtn.style.pointerEvents = "auto";
+        });
     });
   }
 

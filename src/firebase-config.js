@@ -46,7 +46,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
-provider.setCustomParameters({ prompt: "select_account" });
+provider.setCustomParameters({ prompt: "select_account", hd: "kanchiuniv.ac.in" });
 const db = getFirestore(app);
 const storage = getStorage(app);
 

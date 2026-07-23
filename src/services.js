@@ -58,6 +58,24 @@ function handleDbError(err) {
   return false;
 }
 
+function getLocalProfile(uid) {
+  const localProfile = localStorage.getItem(`imra_profile_${uid}`);
+  return localProfile ? JSON.parse(localProfile) : null;
+}
+
+function saveLocalProfile(uid, payload) {
+  localStorage.setItem(`imra_profile_${uid}`, JSON.stringify(payload));
+  let usersList = JSON.parse(localStorage.getItem("imra_users_list")) || [];
+  usersList = usersList.filter(u => u.uid !== uid);
+  usersList.push(payload);
+  localStorage.setItem("imra_users_list", JSON.stringify(usersList));
+}
+
+function getLocalSupervisors() {
+  const list = JSON.parse(localStorage.getItem("imra_users_list")) || [];
+  return list.filter(u => String(u.role).toLowerCase() === "supervisor" && !["sup_1", "sup_2"].includes(u.uid));
+}
+
 async function apiFetch(path, options = {}) {
   const user = auth.currentUser;
   if (!user) throw new Error("Please sign in first.");
@@ -85,74 +103,26 @@ async function apiFetch(path, options = {}) {
    MOCK DATA INITIALIZATION FOR LOCAL SANDBOX
    ═══════════════════════════════════════════════════════ */
 
-// Initialize a list of mock supervisors if they do not exist
-function initMockSupervisors() {
-  const supervisorsKey = "imra_users_list";
-  let usersList = JSON.parse(localStorage.getItem(supervisorsKey)) || [];
-  
-  const hasSupervisors = usersList.some(u => u.role === "supervisor");
-  if (!hasSupervisors) {
-    const mockSupervisors = [
-      {
-        uid: "sup_1",
-        displayName: "Dr. Arul Kumar",
-        email: "arul.k@kanchiuniv.ac.in",
-        role: "supervisor",
-        department: "Computer Science",
-        createdAt: new Date().toISOString()
-      },
-      {
-        uid: "sup_2",
-        displayName: "Dr. S. Radhakrishnan",
-        email: "radha.s@kanchiuniv.ac.in",
-        role: "supervisor",
-        department: "Information Technology",
-        createdAt: new Date().toISOString()
-      }
-    ];
-    usersList = [...usersList, ...mockSupervisors];
-    localStorage.setItem(supervisorsKey, JSON.stringify(usersList));
-  }
-}
-
-// Call on startup
-initMockSupervisors();
-
 /* ═══════════════════════════════════════════════════════
    USER PROFILES DATA ACCESS
    ═══════════════════════════════════════════════════════ */
 
 export async function fetchProfile(uid) {
-  if (useLocalFallback) {
-    const localProfile = localStorage.getItem(`imra_profile_${uid}`);
-    return localProfile ? JSON.parse(localProfile) : null;
-  }
   try {
     const data = await apiFetch("/me");
     return data.profile;
   } catch (err) {
     if (handleDbError(err)) {
-      const localProfile = localStorage.getItem(`imra_profile_${uid}`);
-      return localProfile ? JSON.parse(localProfile) : null;
+      return getLocalProfile(uid);
     }
     console.error("fetchProfile error:", err);
-    return null;
+    return getLocalProfile(uid);
   }
 }
 
 export async function createProfile(uid, data) {
   const payload = { ...data, uid, createdAt: new Date().toISOString() };
-  
-  if (useLocalFallback) {
-    localStorage.setItem(`imra_profile_${uid}`, JSON.stringify(payload));
-    // Index user
-    let usersList = JSON.parse(localStorage.getItem("imra_users_list")) || [];
-    usersList = usersList.filter(u => u.uid !== uid);
-    usersList.push(payload);
-    localStorage.setItem("imra_users_list", JSON.stringify(usersList));
-    return payload;
-  }
-  
+
   try {
     const result = await apiFetch("/me", {
       method: "PUT",
@@ -161,11 +131,7 @@ export async function createProfile(uid, data) {
     return result.profile;
   } catch (err) {
     if (handleDbError(err)) {
-      localStorage.setItem(`imra_profile_${uid}`, JSON.stringify(payload));
-      let usersList = JSON.parse(localStorage.getItem("imra_users_list")) || [];
-      usersList = usersList.filter(u => u.uid !== uid);
-      usersList.push(payload);
-      localStorage.setItem("imra_users_list", JSON.stringify(usersList));
+      saveLocalProfile(uid, payload);
       return payload;
     }
     throw err;
@@ -173,17 +139,6 @@ export async function createProfile(uid, data) {
 }
 
 export async function updateProfile(uid, data) {
-  if (useLocalFallback) {
-    const current = JSON.parse(localStorage.getItem(`imra_profile_${uid}`)) || {};
-    const updated = { ...current, ...data };
-    localStorage.setItem(`imra_profile_${uid}`, JSON.stringify(updated));
-    
-    let usersList = JSON.parse(localStorage.getItem("imra_users_list")) || [];
-    usersList = usersList.map(u => u.uid === uid ? updated : u);
-    localStorage.setItem("imra_users_list", JSON.stringify(usersList));
-    return;
-  }
-  
   try {
     await apiFetch("/me", {
       method: "PUT",
@@ -191,13 +146,9 @@ export async function updateProfile(uid, data) {
     });
   } catch (err) {
     if (handleDbError(err)) {
-      const current = JSON.parse(localStorage.getItem(`imra_profile_${uid}`)) || {};
+      const current = getLocalProfile(uid) || {};
       const updated = { ...current, ...data };
-      localStorage.setItem(`imra_profile_${uid}`, JSON.stringify(updated));
-      
-      let usersList = JSON.parse(localStorage.getItem("imra_users_list")) || [];
-      usersList = usersList.map(u => u.uid === uid ? updated : u);
-      localStorage.setItem("imra_users_list", JSON.stringify(usersList));
+      saveLocalProfile(uid, updated);
       return;
     }
     throw err;
@@ -205,40 +156,98 @@ export async function updateProfile(uid, data) {
 }
 
 export async function fetchSupervisors() {
-  if (useLocalFallback) {
-    const list = JSON.parse(localStorage.getItem("imra_users_list")) || [];
-    return list.filter(u => u.role === "supervisor");
-  }
-  
   try {
     const data = await apiFetch("/supervisors");
     return data.supervisors || [];
   } catch (err) {
     if (handleDbError(err)) {
-      const list = JSON.parse(localStorage.getItem("imra_users_list")) || [];
-      return list.filter(u => u.role === "supervisor");
+      return getLocalSupervisors();
     }
     console.error("fetchSupervisors error:", err);
-    return [];
+    return getLocalSupervisors();
   }
 }
 
 export async function fetchScholarsForSupervisor(supervisorUid) {
-  if (useLocalFallback) {
-    const list = JSON.parse(localStorage.getItem("imra_users_list")) || [];
-    return list.filter(u => u.role === "scholar" && u.supervisorId === supervisorUid);
-  }
-  
   try {
     const data = await apiFetch("/supervisor/scholars");
     return data.scholars || [];
   } catch (err) {
     if (handleDbError(err)) {
       const list = JSON.parse(localStorage.getItem("imra_users_list")) || [];
-      return list.filter(u => u.role === "scholar" && u.supervisorId === supervisorUid);
+      return list.filter(u => String(u.role).toLowerCase() === "scholar" && u.supervisorId === supervisorUid);
     }
     console.error("fetchScholarsForSupervisor error:", err);
-    return [];
+    const list = JSON.parse(localStorage.getItem("imra_users_list")) || [];
+    return list.filter(u => String(u.role).toLowerCase() === "scholar" && u.supervisorId === supervisorUid);
+  }
+}
+
+export async function sendSupervisorRequest(supervisorEmail, department = "", message = "") {
+  try {
+    const result = await apiFetch("/supervisor-requests", {
+      method: "POST",
+      body: JSON.stringify({ supervisorEmail, department, message }),
+    });
+    return result.request || { id: result.id, status: result.status };
+  } catch (err) {
+    if (!handleDbError(err)) throw err;
+
+    const user = auth.currentUser;
+    const scholar = getLocalProfile(user?.uid) || {};
+    const supervisor = getLocalSupervisors().find(u => String(u.email).toLowerCase() === supervisorEmail);
+    const request = {
+      id: `req_${Date.now()}`,
+      scholarId: user?.uid || scholar.uid || "",
+      scholarEmail: user?.email || scholar.email || "",
+      scholarName: scholar.displayName || user?.displayName || user?.email || "Scholar",
+      supervisorId: supervisor?.uid || "",
+      supervisorEmail,
+      supervisorName: supervisor?.displayName || supervisorEmail,
+      department,
+      message,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+    };
+    const list = JSON.parse(localStorage.getItem("imra_supervisor_requests")) || [];
+    list.push(request);
+    localStorage.setItem("imra_supervisor_requests", JSON.stringify(list));
+    return request;
+  }
+}
+
+export async function fetchSupervisorRequests() {
+  try {
+    const data = await apiFetch("/supervisor-requests");
+    return data.requests || [];
+  } catch (err) {
+    if (!handleDbError(err)) {
+      console.error("fetchSupervisorRequests error:", err);
+    }
+    const user = auth.currentUser;
+    const profile = getLocalProfile(user?.uid) || {};
+    const list = JSON.parse(localStorage.getItem("imra_supervisor_requests")) || [];
+    if (String(profile.role).toLowerCase() === "supervisor") {
+      return list.filter(item => item.supervisorId === user.uid || item.supervisorEmail === user.email);
+    }
+    return list.filter(item => !item.scholarId || item.scholarId === user?.uid || item.scholarEmail === user?.email);
+  }
+}
+
+export async function respondToSupervisorRequest(id, status, responseNote = "") {
+  try {
+    await apiFetch(`/supervisor-requests/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, responseNote }),
+    });
+  } catch (err) {
+    if (!handleDbError(err)) throw err;
+
+    const list = JSON.parse(localStorage.getItem("imra_supervisor_requests")) || [];
+    const updated = list.map((item) =>
+      item.id === id ? { ...item, status, responseNote, updatedAt: new Date().toISOString() } : item
+    );
+    localStorage.setItem("imra_supervisor_requests", JSON.stringify(updated));
   }
 }
 
@@ -773,9 +782,19 @@ export async function uploadToCloudStorage(userId, file) {
   }
   
   try {
-    const storageRef = ref(storage, `users/${userId}/uploads/${file.name}`);
-    await uploadBytes(storageRef, file);
-    return await getDownloadURL(storageRef);
+    const buffer = await file.arrayBuffer();
+    let binary = "";
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const result = await apiFetch("/files/upload", {
+      method: "POST",
+      body: JSON.stringify({
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        contentBase64: btoa(binary),
+      }),
+    });
+    return result.file?.url || null;
   } catch (err) {
     if (handleDbError(err)) {
       const key = `imra_files_${userId}`;
@@ -799,15 +818,8 @@ export async function loadCloudFiles(userId) {
   }
   
   try {
-    const folderRef = ref(storage, `users/${userId}/uploads`);
-    const result = await listAll(folderRef);
-    const files = await Promise.all(
-      result.items.map(async (itemRef) => {
-        const url = await getDownloadURL(itemRef);
-        return { name: itemRef.name, url };
-      })
-    );
-    return files;
+    const data = await apiFetch("/files");
+    return data.files || [];
   } catch (err) {
     if (handleDbError(err)) {
       return JSON.parse(localStorage.getItem(`imra_files_${userId}`)) || [];

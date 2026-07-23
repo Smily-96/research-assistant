@@ -7,7 +7,7 @@
 const express = require("express");
 const router = express.Router();
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-const { admin, db } = require("./firebase-admin");
+const { admin, db, bucket } = require("./firebase-admin");
 
 /* -------------------------------------------------------
    Gemini AI Setup
@@ -44,7 +44,12 @@ async function requireAuth(req, res, next) {
 
 function serializeDoc(docSnap) {
   if (!docSnap.exists) return null;
-  return { id: docSnap.id, ...docSnap.data() };
+  const data = docSnap.data();
+  return {
+    id: docSnap.id,
+    ...data,
+    role: typeof data.role === "string" ? data.role.toLowerCase() : data.role,
+  };
 }
 
 function cleanObject(input = {}) {
@@ -84,6 +89,9 @@ function canAccessScholar(profile, scholarId) {
    Helper: call Gemini with a plain text prompt
 ------------------------------------------------------- */
 async function callGemini(prompt) {
+  if (!process.env.GOOGLE_API_KEY) {
+    throw new Error("GOOGLE_API_KEY is not configured on the server.");
+  }
   const result = await model.generateContent(prompt);
   return result.response.text();
 }
@@ -159,8 +167,11 @@ router.put("/me", requireAuth, async (req, res) => {
 
 router.get("/supervisors", requireAuth, async (req, res) => {
   try {
-    const snap = await db.collection("users").where("role", "==", "supervisor").get();
-    res.json({ supervisors: snap.docs.map(serializeDoc) });
+    const snap = await db.collection("users").get();
+    const supervisors = snap.docs
+      .map(serializeDoc)
+      .filter((profile) => profile?.role === "supervisor");
+    res.json({ supervisors });
   } catch (error) {
     console.error("[GET /api/supervisors] Error:", error.message);
     res.status(500).json({ error: "Failed to load supervisors." });
@@ -182,6 +193,206 @@ router.get("/supervisor/scholars", requireAuth, requireProfile, async (req, res)
   } catch (error) {
     console.error("[GET /api/supervisor/scholars] Error:", error.message);
     res.status(500).json({ error: "Failed to load scholars." });
+  }
+});
+
+router.post("/supervisor-requests", requireAuth, requireProfile, async (req, res) => {
+  if (req.profile.role !== "scholar") {
+    return res.status(403).json({ error: "Only scholars can request supervisors." });
+  }
+  if (!requireFields(res, req.body, ["supervisorEmail"])) return;
+
+  const supervisorEmail = String(req.body.supervisorEmail).trim().toLowerCase();
+  if (!isInstituteEmail(supervisorEmail)) {
+    return res.status(400).json({ error: "Supervisor email must be a Kanchi University email." });
+  }
+
+  try {
+    const supervisorSnap = await db
+      .collection("users")
+      .where("email", "==", supervisorEmail)
+      .limit(1)
+      .get();
+
+    if (supervisorSnap.empty) {
+      return res.status(404).json({ error: "No supervisor account found with that email." });
+    }
+
+    const supervisor = serializeDoc(supervisorSnap.docs[0]);
+    if (supervisor.role !== "supervisor") {
+      return res.status(404).json({ error: "No supervisor account found with that email." });
+    }
+    const existingSnap = await db
+      .collection("supervisorRequests")
+      .where("scholarId", "==", req.user.uid)
+      .where("supervisorId", "==", supervisor.uid || supervisor.id)
+      .where("status", "==", "pending")
+      .limit(1)
+      .get();
+
+    if (!existingSnap.empty) {
+      return res.json({ id: existingSnap.docs[0].id, status: "pending" });
+    }
+
+    const payload = {
+      scholarId: req.user.uid,
+      scholarEmail: req.user.email,
+      scholarName: req.profile.displayName || req.user.name || req.user.email,
+      supervisorId: supervisor.uid || supervisor.id,
+      supervisorEmail,
+      supervisorName: supervisor.displayName || supervisorEmail,
+      department: req.body.department || req.profile.department || "",
+      message: req.body.message || "",
+      status: "pending",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    const ref = await db.collection("supervisorRequests").add(payload);
+    res.status(201).json({ id: ref.id, request: { id: ref.id, ...payload } });
+  } catch (error) {
+    console.error("[POST /api/supervisor-requests] Error:", error.message);
+    res.status(500).json({ error: "Failed to send supervisor request." });
+  }
+});
+
+router.get("/supervisor-requests", requireAuth, requireProfile, async (req, res) => {
+  try {
+    let q = db.collection("supervisorRequests");
+    if (req.profile.role === "supervisor") {
+      q = q.where("supervisorId", "==", req.user.uid);
+    } else {
+      q = q.where("scholarId", "==", req.user.uid);
+    }
+    const snap = await q.get();
+    const requests = snap.docs
+      .map(serializeDoc)
+      .sort((a, b) => (b.createdAt?._seconds || 0) - (a.createdAt?._seconds || 0));
+    res.json({ requests });
+  } catch (error) {
+    console.error("[GET /api/supervisor-requests] Error:", error.message);
+    res.status(500).json({ error: "Failed to load supervisor requests." });
+  }
+});
+
+router.patch("/supervisor-requests/:id", requireAuth, requireProfile, async (req, res) => {
+  if (req.profile.role !== "supervisor") {
+    return res.status(403).json({ error: "Supervisor access required." });
+  }
+
+  const status = req.body.status;
+  if (!["accepted", "rejected"].includes(status)) {
+    return res.status(400).json({ error: "Status must be accepted or rejected." });
+  }
+
+  try {
+    const ref = db.collection("supervisorRequests").doc(req.params.id);
+    const snap = await ref.get();
+    const request = serializeDoc(snap);
+    if (!request) return res.status(404).json({ error: "Request not found." });
+    if (request.supervisorId !== req.user.uid) {
+      return res.status(403).json({ error: "Not allowed to update this request." });
+    }
+
+    await ref.update({
+      status,
+      responseNote: req.body.responseNote || "",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    if (status === "accepted") {
+      await db.collection("users").doc(request.scholarId).set(
+        {
+          supervisorId: req.user.uid,
+          department: request.department || "",
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("[PATCH /api/supervisor-requests/:id] Error:", error.message);
+    res.status(500).json({ error: "Failed to update supervisor request." });
+  }
+});
+
+router.get("/files", requireAuth, async (req, res) => {
+  try {
+    const snap = await db
+      .collection("users")
+      .doc(req.user.uid)
+      .collection("files")
+      .get();
+    const files = await Promise.all(
+      snap.docs.map(async (docSnap) => {
+        const data = docSnap.data();
+        let url = data.url || "";
+        if (data.storagePath) {
+          try {
+            const [signedUrl] = await bucket.file(data.storagePath).getSignedUrl({
+              action: "read",
+              expires: "2030-01-01",
+            });
+            url = signedUrl;
+          } catch (error) {
+            console.warn("[files] signed URL failed:", error.message);
+          }
+        }
+        return { id: docSnap.id, ...data, url };
+      })
+    );
+    files.sort((a, b) => (b.uploadedAt?._seconds || 0) - (a.uploadedAt?._seconds || 0));
+    res.json({ files });
+  } catch (error) {
+    console.error("[GET /api/files] Error:", error.message);
+    res.status(500).json({ error: "Failed to load files." });
+  }
+});
+
+router.post("/files/upload", requireAuth, async (req, res) => {
+  if (!requireFields(res, req.body, ["name", "contentBase64"])) return;
+
+  try {
+    const buffer = Buffer.from(req.body.contentBase64, "base64");
+    const maxBytes = 8 * 1024 * 1024;
+    if (buffer.length > maxBytes) {
+      return res.status(400).json({ error: "File too large. Maximum size is 8 MB." });
+    }
+
+    const safeName = String(req.body.name).replace(/[\\/:*?"<>|]/g, "_");
+    const storagePath = `users/${req.user.uid}/uploads/${Date.now()}-${safeName}`;
+    const file = bucket.file(storagePath);
+    await file.save(buffer, {
+      metadata: {
+        contentType: req.body.type || "application/octet-stream",
+        metadata: {
+          owner: req.user.uid,
+          originalName: safeName,
+        },
+      },
+      resumable: false,
+    });
+
+    const metadata = {
+      name: safeName,
+      size: buffer.length,
+      type: req.body.type || "",
+      storagePath,
+      uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    const ref = await db
+      .collection("users")
+      .doc(req.user.uid)
+      .collection("files")
+      .add(metadata);
+
+    const [url] = await file.getSignedUrl({ action: "read", expires: "2030-01-01" });
+    res.status(201).json({ id: ref.id, file: { id: ref.id, ...metadata, url } });
+  } catch (error) {
+    console.error("[POST /api/files/upload] Error:", error.message);
+    res.status(500).json({ error: "Failed to upload file." });
   }
 });
 
@@ -509,6 +720,9 @@ router.post("/literature/review", async (req, res) => {
   if (!requireFields(res, req.body, ["text"])) return;
 
   const { text } = req.body;
+  if (!String(text).trim()) {
+    return res.status(400).json({ error: "No readable paper text found. Please upload a text-based PDF." });
+  }
 
   try {
     const prompt = `You are an expert academic research assistant. Synthesize a comprehensive literature review from the following research papers.
