@@ -46,6 +46,7 @@ import {
 import {
   getSyncMode,
   resetFallbackMode,
+  clearLocalSandboxData,
   fetchProfile,
   createProfile,
   updateProfile,
@@ -1736,8 +1737,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (badge) {
     badge.onclick = () => {
       if (getSyncMode() === "local") {
-        if (confirm("Would you like to retry Cloud Sync? If Firestore Rules are updated, this will reconnect to the cloud database.")) {
-          resetFallbackMode();
+        if (confirm("Retry Cloud Sync and clear old local sandbox profile data?")) {
+          clearLocalSandboxData();
           window.location.reload();
         }
       }

@@ -36,6 +36,14 @@ export function resetFallbackMode() {
   triggerModeChange("cloud");
 }
 
+export function clearLocalSandboxData() {
+  Object.keys(localStorage)
+    .filter((key) => key.startsWith("imra_"))
+    .forEach((key) => localStorage.removeItem(key));
+  useLocalFallback = false;
+  triggerModeChange("cloud");
+}
+
 function triggerModeChange(mode) {
   window.dispatchEvent(new CustomEvent("imra-mode-change", { detail: { mode } }));
   // Show a console warning or custom log
