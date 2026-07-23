@@ -119,6 +119,8 @@ async function checkScholarSupervisorSetup() {
 
   const existingRequests = await fetchSupervisorRequests().catch(() => []);
   const pendingRequest = existingRequests.find((item) => item.status === "pending");
+  if (pendingRequest) return true;
+
   const supervisors = await fetchSupervisors().catch(() => []);
   const supervisorOptions = supervisors
     .map((supervisor) => {
@@ -177,11 +179,23 @@ async function checkScholarSupervisorSetup() {
       return alert("Please enter a valid @kanchiuniv.ac.in supervisor email.");
     }
 
-    await updateProfile(auth.currentUser.uid, { department });
-    await sendSupervisorRequest(supervisorEmail, department, message);
-    myProfile.department = department;
-    toast("Request sent to supervisor.");
-    loadViewByRoute();
+    const btn = document.getElementById("save-setup-btn");
+    btn.disabled = true;
+    btn.textContent = "Sending...";
+
+    try {
+      await updateProfile(auth.currentUser.uid, { department });
+      await sendSupervisorRequest(supervisorEmail, department, message);
+      myProfile.department = department;
+      toast("Request sent to supervisor.", "success");
+      alert("Request sent to supervisor.");
+      loadView("dashboard");
+    } catch (error) {
+      console.error("Supervisor request failed:", error);
+      alert(`Request failed: ${error.message}`);
+      btn.disabled = false;
+      btn.textContent = "Send Request";
+    }
   };
 
   return false;
